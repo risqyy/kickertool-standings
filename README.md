@@ -84,6 +84,24 @@ docker compose up
 
 Frontend: `http://localhost:5173`. Backend health: `http://localhost:8080/healthz`. The compose healthcheck waits for the backend before starting the frontend.
 
+## GHCR release images
+
+Every pushed Git tag triggers `.github/workflows/release-images.yml`. The workflow checks out that exact tag, runs all backend/frontend quality gates, and then publishes only the exact tag (never `latest`) for both images:
+
+- `ghcr.io/risqyy/kickertool-standings-backend:<tag>`
+- `ghcr.io/risqyy/kickertool-standings-frontend:<tag>`
+
+Example release and pull commands:
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+docker pull ghcr.io/risqyy/kickertool-standings-backend:v0.1.0
+docker pull ghcr.io/risqyy/kickertool-standings-frontend:v0.1.0
+```
+
+GHCR package visibility and repository linkage are managed in GitHub. The images contain no local `.env`, API token, admin credential, database, or club-specific configuration; provide deployment configuration at runtime.
+
 ## Verification
 
 ```powershell
