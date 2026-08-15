@@ -1,0 +1,234 @@
+openapi: 3.0.3
+info:
+  title: Kickertool Ranking API
+  version: 1.0.0
+  description: Versioned public ranking and protected administration contract.
+servers:
+  - url: /
+paths:
+  /api/v1/public/rankings:
+    get:
+      operationId: listPublicRankings
+      responses:
+        '200':
+          description: Included tournament contributions only.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RankingResponse'
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/standings:
+    get:
+      deprecated: true
+      operationId: legacyStandings
+      responses:
+        '200':
+          description: Compatibility ranking JSON.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/LegacyRankingRow' }
+  /api/v1/admin/session:
+    get:
+      security: [{ basicAuth: [] }]
+      operationId: adminSession
+      responses:
+        '200':
+          description: Session and CSRF token bootstrap.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [authenticated, csrf_token]
+                properties:
+                  authenticated: { type: boolean }
+                  csrf_token: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/admin/dashboard:
+    get:
+      security: [{ basicAuth: [] }]
+      responses:
+        '200':
+          description: Dashboard counters.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Dashboard' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/admin/tournaments:
+    get:
+      security: [{ basicAuth: [] }]
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: included, in: query, schema: { type: boolean } }
+        - { name: state, in: query, schema: { type: string } }
+        - { name: source, in: query, schema: { type: string } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: sort, in: query, schema: { type: string } }
+        - { name: direction, in: query, schema: { type: string, enum: [asc, desc] } }
+      responses:
+        '200':
+          description: Filtered tournament page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TournamentPage'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/admin/tournaments/{id}/inclusion:
+    patch:
+      security: [{ basicAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [included, expectedVersion]
+              properties:
+                included: { type: boolean }
+                expectedVersion: { type: integer, format: int64 }
+                reason: { type: string, maxLength: 500 }
+      responses:
+        '200': { description: Inclusion changed. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/admin/players/search:
+    get:
+      security: [{ basicAuth: [] }]
+      parameters:
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 2 } }
+      responses:
+        '200':
+          description: Normalized player search results.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Player' } }
+                  message: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/admin/players/merge/preview:
+    post:
+      security: [{ basicAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sourcePlayerId, targetPlayerId]
+              properties:
+                sourcePlayerId: { type: integer }
+                targetPlayerId: { type: integer }
+      responses:
+        '200': { description: Dry-run merge plan. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+  /api/v1/admin/players/merge/confirm:
+    post:
+      security: [{ basicAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, targetDisplayName, confirmed]
+              properties:
+                token: { type: string }
+                targetDisplayName: { type: string }
+                confirmed: { type: boolean, const: true }
+      responses:
+        '200': { description: Idempotent merge result. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+      description: Backend-only HTTP Basic Authentication. Base64 is not encryption.
+  schemas:
+    RankingResponse:
+      type: object
+      required: [items, lastSyncAt]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/RankingRow' } }
+        lastSyncAt: { type: string, format: date-time, nullable: true }
+    RankingRow:
+      type: object
+      required: [rank, name, includedTournamentCount]
+      properties:
+        rank: { type: integer }
+        name: { type: string }
+        includedTournamentCount: { type: integer }
+        gamesPlayed: { type: integer, nullable: true }
+        totalPoints: { type: string, pattern: '^-?\d+\.\d{2}$', nullable: true }
+        pointsPerGame: { type: string, pattern: '^-?\d+\.\d{2}$', nullable: true }
+        goalDifference: { type: integer, nullable: true }
+    LegacyRankingRow:
+      allOf:
+        - $ref: '#/components/schemas/RankingRow'
+    Dashboard:
+      type: object
+      required: [tournamentCount, includedTournamentCount, excludedTournamentCount, playerCount]
+      properties:
+        tournamentCount: { type: integer }
+        includedTournamentCount: { type: integer }
+        excludedTournamentCount: { type: integer }
+        playerCount: { type: integer }
+        lastSyncAt: { type: string, format: date-time, nullable: true }
+    TournamentPage:
+      type: object
+      required: [items, page, limit, total]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Tournament' } }
+        page: { type: integer }
+        limit: { type: integer }
+        total: { type: integer }
+        last_sync_at: { type: string, format: date-time, nullable: true }
+    Tournament:
+      type: object
+      required: [id, name, source, includedInRanking, inclusionVersion]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        source: { type: string }
+        status: { type: string, nullable: true }
+        isLive: { type: boolean }
+        date: { type: string, format: date-time, nullable: true }
+        includedInRanking: { type: boolean }
+        inclusionVersion: { type: integer, format: int64 }
+    Player:
+      type: object
+      required: [id, displayName, aliases, tournamentCount]
+      properties:
+        id: { type: integer }
+        displayName: { type: string }
+        aliases: { type: array, items: { type: string } }
+        tournamentCount: { type: integer }
+        gamesPlayed: { type: integer, nullable: true }
+        totalPointsCents: { type: integer, format: int64, nullable: true }
+        pointsPerGameCents: { type: integer, format: int64, nullable: true }
+        goalDifference: { type: integer, nullable: true }
+  responses:
+    Unauthorized:
+      description: Missing or invalid Basic Auth.
+      headers:
+        WWW-Authenticate: { schema: { type: string } }
+    Forbidden: { description: CSRF, origin, or mutation validation failure. }
+    NotFound: { description: Resource not found. }
+    Conflict: { description: Optimistic version or stale merge-plan conflict. }
+    InternalError: { description: Internal backend error. }

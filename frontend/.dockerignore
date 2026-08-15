@@ -1,0 +1,16 @@
+.git/
+.env
+.env.*
+!.env.example
+
+# Frontend dependencies and generated output
+node_modules/
+dist/
+coverage/
+.vite/
+playwright-report/
+test-results/
+*.tsbuildinfo
+.eslintcache
+.npm-cache-local/
+*.log

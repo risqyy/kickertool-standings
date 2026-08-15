@@ -1,0 +1,50 @@
+# Local environment files (keep the checked-in example)
+/.env
+/.env.*
+!/.env.example
+
+# Root legacy Go caches
+/.gocache/
+/.gocache-local/
+/.gomodcache/
+/.gopath/
+
+# Frontend generated output
+/frontend/node_modules/
+/frontend/dist/
+/frontend/coverage/
+/frontend/.vite/
+/frontend/playwright-report/
+/frontend/test-results/
+/frontend/*.tsbuildinfo
+/frontend/.eslintcache
+
+# Backend generated output
+/backend/bin/
+/backend/*.test
+/backend/*.out
+/backend/coverage.out
+/backend/coverage.html
+/backend/*.prof
+
+# Runtime data and SQLite sidecars (do not ignore database files generally)
+/data/
+/backend/data/
+/data/*.db-wal
+/data/*.db-shm
+/data/*.db-journal
+/backend/data/*.db-wal
+/backend/data/*.db-shm
+/backend/data/*.db-journal
+
+# Local source captures and tooling cache
+/.source-*.html
+/.source-*.txt
+/.npm-cache-local/
+
+# IDE and operating-system files
+/.idea/
+/.vscode/
+*.iml
+.DS_Store
+Thumbs.db

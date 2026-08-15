@@ -1,0 +1,20 @@
+.git/
+.env
+.env.*
+!.env.example
+
+# Runtime data and SQLite sidecars
+data/
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Local Go caches and generated output
+.gocache/
+.gocache-local/
+.gomodcache/
+.gopath/
+bin/
+*.test
+*.out
+*.prof

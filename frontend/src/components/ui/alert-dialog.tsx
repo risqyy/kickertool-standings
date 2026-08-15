@@ -1,0 +1,7 @@
+import { AlertTriangle, X } from 'lucide-react'
+import { Button } from './button'
+
+export function AlertDialog({ open, title, description, confirmLabel, onConfirm, onCancel, destructive = false }: { open: boolean; title: string; description: string; confirmLabel: string; onConfirm: () => void; onCancel: () => void; destructive?: boolean }) {
+  if (!open) return null
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="presentation"><div className="w-full max-w-md rounded-lg border bg-card p-6 shadow-xl" role="alertdialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="dialog-description"><div className="flex items-start justify-between gap-4"><div className="flex items-start gap-3"><AlertTriangle className={destructive ? 'text-destructive' : 'text-amber-600'} aria-hidden="true" /><div><h2 id="dialog-title" className="font-semibold">{title}</h2><p id="dialog-description" className="mt-2 text-sm text-muted-foreground">{description}</p></div></div><button type="button" className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md hover:bg-muted" aria-label="Dialog schließen" onClick={onCancel}><X aria-hidden="true" /></button></div><div className="mt-6 flex justify-end gap-3"><Button variant="outline" onClick={onCancel}>Abbrechen</Button><Button variant={destructive ? 'destructive' : 'default'} onClick={onConfirm}>{confirmLabel}</Button></div></div></div>
+}
