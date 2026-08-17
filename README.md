@@ -84,6 +84,21 @@ docker compose up
 
 Frontend: `http://localhost:5173`. Backend health: `http://localhost:8080/healthz`. The compose healthcheck waits for the backend before starting the frontend.
 
+### Reverse proxy / TLS deployment
+
+Terminate TLS in front of the `frontend` service and proxy the public host to
+that service's port 80. The reverse proxy must preserve the public host and
+set `X-Forwarded-Proto: https`; for example, its upstream request must include:
+
+```text
+Host: fvh.playground.risqy.de
+X-Forwarded-Proto: https
+```
+
+The frontend Nginx forwards both values to the backend. They are required for
+the admin API's same-origin check and for its secure CSRF cookie. Do not proxy
+the browser directly to the backend; expose only the frontend service publicly.
+
 ## GHCR release images
 
 Every pushed Git tag triggers `.github/workflows/release-images.yml`. The workflow checks out that exact tag, runs all backend/frontend quality gates, and then publishes only the exact tag (never `latest`) for both images:
