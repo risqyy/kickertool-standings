@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Kickertool Ranking API
-  version: 1.0.0
+  version: 1.0.3
   description: Versioned public ranking and protected administration contract.
 servers:
   - url: /
@@ -9,13 +9,25 @@ paths:
   /api/v1/public/rankings:
     get:
       operationId: listPublicRankings
+      parameters:
+        - name: year
+          in: query
+          required: false
+          description: Four-digit calendar year for a completed-tournament ranking; omit for the cumulative ranking.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1000
+            maximum: 9999
       responses:
         '200':
-          description: Included tournament contributions only.
+          description: Cumulative ranking when selectedYear is null; otherwise ranking from included completed tournaments in the selected calendar year.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/RankingResponse'
+        '400':
+          description: Invalid year query parameter.
         '500': { $ref: '#/components/responses/InternalError' }
   /api/standings:
     get:
@@ -163,10 +175,15 @@ components:
   schemas:
     RankingResponse:
       type: object
-      required: [items, lastSyncAt]
+      required: [items, lastSyncAt, availableYears, selectedYear]
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/RankingRow' } }
         lastSyncAt: { type: string, format: date-time, nullable: true }
+        availableYears:
+          type: array
+          description: Years with included, completed tournaments and complete standings, newest first.
+          items: { type: integer, format: int32 }
+        selectedYear: { type: integer, format: int32, nullable: true }
     RankingRow:
       type: object
       required: [rank, name, includedTournamentCount]

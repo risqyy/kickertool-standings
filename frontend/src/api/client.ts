@@ -1,4 +1,4 @@
-import type { Dashboard, MergeResult, Player, RankingRow, TournamentPage } from './types'
+import type { Dashboard, MergeResult, Player, RankingsResponse, TournamentPage } from './types'
 
 export class ApiError extends Error {
   status: number
@@ -39,7 +39,10 @@ async function adminMutation<T>(path: string, csrf: string, init: RequestInit): 
   }
 }
 
-export async function getRankings() { return request<{ items: RankingRow[]; lastSyncAt: string | null }>('/api/v1/public/rankings') }
+export async function getRankings(year?: number | null) {
+  const search = year === undefined || year === null ? '' : '?' + new URLSearchParams({ year: String(year) })
+  return request<RankingsResponse>('/api/v1/public/rankings' + search)
+}
 export async function getAdminSession() { return request<{ authenticated: boolean; csrf_token: string }>('/api/v1/admin/session') }
 export async function getDashboard() { return (await request<{ data: Dashboard }>('/api/v1/admin/dashboard')).data }
 
