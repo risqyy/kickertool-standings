@@ -59,7 +59,7 @@ func main() {
 	}
 	defer sqlDB.Close()
 
-	client := httpclient.New(&http.Client{}, cfg.HTTPTimeout, cfg.MaxRetries, cfg.RetryBackoff, "kickertool-ranking/1.0.2", &logger)
+	client := httpclient.New(&http.Client{}, cfg.HTTPTimeout, cfg.MaxRetries, cfg.RetryBackoff, "kickertool-ranking/1.0.3", &logger)
 	var source ports.TournamentSource
 	var standingSource ports.TournamentStandingSource
 	var sourceLabel string

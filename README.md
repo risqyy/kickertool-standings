@@ -109,10 +109,10 @@ Every pushed Git tag triggers `.github/workflows/release-images.yml`. The workfl
 Example release and pull commands:
 
 ```powershell
-git tag v1.0.2
-git push origin v1.0.2
-docker pull ghcr.io/risqyy/kickertool-standings-backend:v1.0.2
-docker pull ghcr.io/risqyy/kickertool-standings-frontend:v1.0.2
+git tag v1.0.3
+git push origin v1.0.3
+docker pull ghcr.io/risqyy/kickertool-standings-backend:v1.0.3
+docker pull ghcr.io/risqyy/kickertool-standings-frontend:v1.0.3
 ```
 
 GHCR package visibility and repository linkage are managed in GitHub. The images contain no local `.env`, API token, admin credential, database, or club-specific configuration; provide deployment configuration at runtime.

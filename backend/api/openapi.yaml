@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Kickertool Ranking API
-  version: 1.0.2
+  version: 1.0.3
   description: Versioned public ranking and protected administration contract.
 servers:
   - url: /

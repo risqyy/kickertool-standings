@@ -33,7 +33,7 @@ func New(client *http.Client, timeout time.Duration, maxRetries int, backoff tim
 		backoff = time.Second
 	}
 	if strings.TrimSpace(userAgent) == "" {
-		userAgent = "kickertool-ranking/1.0.2"
+		userAgent = "kickertool-ranking/1.0.3"
 	}
 	return &RetryingClient{client: client, userAgent: userAgent, maxRetries: maxRetries, backoff: backoff, logger: logger}
 }
