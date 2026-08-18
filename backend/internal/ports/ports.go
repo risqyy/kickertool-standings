@@ -49,6 +49,15 @@ type PlayerRankingReader interface {
 	ListPlayerRanking(ctx context.Context) ([]domain.PlayerAggregate, error)
 }
 
+// PeriodRankingReader provides the public ranking's period-aware view. The
+// cumulative PlayerRankingReader remains the compatibility API used by the
+// legacy standings route.
+type PeriodRankingReader interface {
+	PlayerRankingReader
+	ListPlayerRankingForYear(ctx context.Context, year int) ([]domain.PlayerAggregate, error)
+	ListAvailableRankingYears(ctx context.Context) ([]int, error)
+}
+
 type PlayerMergeService interface {
 	MergePlayers(ctx context.Context, sourcePlayerID, targetPlayerID uint, options domain.PlayerMergeOptions) (domain.MergeResult, error)
 }

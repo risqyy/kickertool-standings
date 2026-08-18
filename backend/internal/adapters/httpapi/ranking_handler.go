@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -34,7 +35,35 @@ func (h *PublicRankingAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		http.NotFound(w, r)
 		return
 	}
-	aggregates, err := h.reader.ListPlayerRanking(r.Context())
+	year, err := requestedRankingYear(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	periodReader, supportsPeriods := h.reader.(ports.PeriodRankingReader)
+	availableYears := []int{}
+	if supportsPeriods {
+		availableYears, err = periodReader.ListAvailableRankingYears(r.Context())
+		if err != nil {
+			http.Error(w, "could not load ranking years", http.StatusInternalServerError)
+			return
+		}
+		if availableYears == nil {
+			availableYears = []int{}
+		}
+		availableYears = append([]int{}, availableYears...)
+		sort.Slice(availableYears, func(i, j int) bool { return availableYears[i] > availableYears[j] })
+	}
+	var aggregates []domain.PlayerAggregate
+	if year != nil {
+		if !supportsPeriods {
+			http.Error(w, "year rankings are unavailable", http.StatusInternalServerError)
+			return
+		}
+		aggregates, err = periodReader.ListPlayerRankingForYear(r.Context(), *year)
+	} else {
+		aggregates, err = h.reader.ListPlayerRanking(r.Context())
+	}
 	if err != nil {
 		http.Error(w, "could not load rankings", http.StatusInternalServerError)
 		return
@@ -51,7 +80,27 @@ func (h *PublicRankingAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(map[string]any{"items": rows, "lastSyncAt": lastSync})
+	_ = json.NewEncoder(w).Encode(map[string]any{"items": rows, "lastSyncAt": lastSync, "availableYears": availableYears, "selectedYear": year})
+}
+
+func requestedRankingYear(r *http.Request) (*int, error) {
+	values, ok := r.URL.Query()["year"]
+	if !ok {
+		return nil, nil
+	}
+	if len(values) != 1 || len(values[0]) != 4 {
+		return nil, fmt.Errorf("year must be a valid four-digit calendar year")
+	}
+	for _, character := range values[0] {
+		if character < '0' || character > '9' {
+			return nil, fmt.Errorf("year must be a valid four-digit calendar year")
+		}
+	}
+	parsed, err := strconv.Atoi(values[0])
+	if err != nil || parsed < 1000 || parsed > 9999 {
+		return nil, fmt.Errorf("year must be a valid four-digit calendar year")
+	}
+	return &parsed, nil
 }
 
 type publicRankingRow struct {

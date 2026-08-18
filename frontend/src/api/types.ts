@@ -10,6 +10,13 @@ export interface RankingRow {
   goalDifference: Nullable<number>
 }
 
+export interface RankingsResponse {
+  items: RankingRow[]
+  lastSyncAt: Nullable<string>
+  availableYears: number[]
+  selectedYear: Nullable<number>
+}
+
 export interface Tournament {
   id: number
   source: string

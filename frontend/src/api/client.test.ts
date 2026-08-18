@@ -1,5 +1,18 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ApiError, getAdminSession, previewMerge } from './client'
+import { ApiError, getAdminSession, getRankings, previewMerge } from './client'
+
+describe('public rankings API', () => {
+  it('adds the selected year as a query parameter and keeps the overall URL unchanged', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [], lastSyncAt: null, availableYears: [2025], selectedYear: 2025 }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await getRankings(2025)
+    await getRankings()
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/public/rankings?year=2025')
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/public/rankings')
+  })
+})
 
 describe('admin CSRF session flow', () => {
   it('uses the session token and includes the browser cookie on preview', async () => {

@@ -239,6 +239,78 @@ func TestListPlayerRankingIsDeterministicallySorted(t *testing.T) {
 	}
 }
 
+func TestYearRankingUsesOnlyIncludedCompletedTournamentsAndScopesMetrics(t *testing.T) {
+	repo, db := testRepo(t)
+	ctx := context.Background()
+	past2025 := time.Date(2025, time.June, 10, 12, 0, 0, 0, time.FixedZone("source", 2*60*60))
+	past2026 := time.Date(2026, time.June, 10, 12, 0, 0, 0, time.FixedZone("source", 2*60*60))
+	future := time.Date(2099, time.June, 10, 12, 0, 0, 0, time.FixedZone("source", 2*60*60))
+	tournaments := []domain.Tournament{
+		{Source: domain.KickertoolAPISource, SourceID: "year-2025", SourceKey: "year-2025", Name: "2025", Date: &past2025, URL: "https://example.test/year-2025"},
+		{Source: domain.KickertoolAPISource, SourceID: "year-2026", SourceKey: "year-2026", Name: "2026", Date: &past2026, URL: "https://example.test/year-2026", Status: "finished"},
+		{Source: domain.KickertoolAPISource, SourceID: "excluded-2025", SourceKey: "excluded-2025", Name: "Excluded", Date: &past2025, URL: "https://example.test/excluded"},
+		{Source: domain.KickertoolAPISource, SourceID: "future-2099", SourceKey: "future-2099", Name: "Future", Date: &future, URL: "https://example.test/future"},
+	}
+	if _, err := repo.UpsertMany(ctx, tournaments); err != nil {
+		t.Fatal(err)
+	}
+	insertComplete := func(tournamentID string, standings ...domain.TournamentStanding) {
+		t.Helper()
+		if _, err := repo.UpsertStandingSnapshot(ctx, domain.StandingSnapshot{Source: domain.KickertoolAPISource, TournamentID: tournamentID, Complete: true, Standings: standings}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p1_2025 := standing("year-2025", "2025-p1", "p1", "Player One", 10)
+	p2_2025 := standing("year-2025", "2025-p2", "p2", "Player Two", 20)
+	p1_2026 := standing("year-2026", "2026-p1", "p1", "Player One", 30)
+	p3_excluded := standing("excluded-2025", "excluded-p3", "p3", "Player Three", 99)
+	p4_future := standing("future-2099", "future-p4", "p4", "Player Four", 99)
+	insertComplete("year-2025", p1_2025, p2_2025)
+	insertComplete("year-2026", p1_2026)
+	insertComplete("excluded-2025", p3_excluded)
+	insertComplete("future-2099", p4_future)
+	var excluded TournamentModel
+	if err := db.Where("source_id = ?", "excluded-2025").First(&excluded).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&excluded).Update("included_in_ranking", false).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	years, err := repo.ListAvailableRankingYears(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(years) != 2 || years[0] != 2026 || years[1] != 2025 {
+		t.Fatalf("available years=%v, want [2026 2025]", years)
+	}
+
+	ranking2025, err := repo.ListPlayerRankingForYear(ctx, 2025)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ranking2025) != 2 || ranking2025[0].PlayerName != "Player Two" || ranking2025[1].PlayerName != "Player One" {
+		t.Fatalf("2025 ranking=%+v", ranking2025)
+	}
+	playerOne := ranking2025[1]
+	if playerOne.TournamentCount != 1 || playerOne.TotalPointsCents == nil || *playerOne.TotalPointsCents != 1000 || playerOne.GamesPlayed == nil || *playerOne.GamesPlayed != 10 || playerOne.GoalDifference == nil || *playerOne.GoalDifference != 8 || playerOne.PointsPerGameCents == nil || *playerOne.PointsPerGameCents != 100 {
+		t.Fatalf("2025 metrics leaked outside period=%+v", playerOne)
+	}
+	for _, row := range ranking2025 {
+		if row.PlayerName == "Player Three" || row.PlayerName == "Player Four" {
+			t.Fatalf("non-qualified player appeared in 2025 ranking: %+v", row)
+		}
+	}
+
+	ranking2024, err := repo.ListPlayerRankingForYear(ctx, 2024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ranking2024 == nil || len(ranking2024) != 0 {
+		t.Fatalf("unavailable year ranking=%+v, want non-nil empty slice", ranking2024)
+	}
+}
+
 func TestPlayersUseCanonicalNameAcrossSourcesAndKeepExternalAliases(t *testing.T) {
 	repo, db := testRepo(t)
 	ctx := context.Background()

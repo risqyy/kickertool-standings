@@ -425,6 +425,268 @@ func (r *Repository) ListPlayerRanking(ctx context.Context) ([]domain.PlayerAggr
 	return ranking, nil
 }
 
+// ListAvailableRankingYears returns calendar years that have at least one
+// included, completed tournament with a complete, non-failed standings
+// snapshot containing usable standing rows. Years are returned newest first.
+func (r *Repository) ListAvailableRankingYears(ctx context.Context) ([]int, error) {
+	tournaments, err := r.qualifiedRankingTournaments(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	location, err := time.LoadLocation(domain.RankingLocation)
+	if err != nil {
+		return nil, fmt.Errorf("load ranking timezone: %w", err)
+	}
+	seen := make(map[int]struct{}, len(tournaments))
+	for _, tournament := range tournaments {
+		if tournament.Date != nil {
+			seen[tournament.Date.In(location).Year()] = struct{}{}
+		}
+	}
+	years := make([]int, 0, len(seen))
+	for year := range seen {
+		years = append(years, year)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(years)))
+	return years, nil
+}
+
+// ListPlayerRankingForYear calculates a period ranking from the source
+// standings instead of the cumulative materialization. This keeps every
+// metric (including tournament count and points per game) scoped to exactly
+// the same qualified tournaments.
+func (r *Repository) ListPlayerRankingForYear(ctx context.Context, year int) ([]domain.PlayerAggregate, error) {
+	tournaments, err := r.qualifiedRankingTournaments(ctx, &year)
+	if err != nil {
+		return nil, err
+	}
+	if len(tournaments) == 0 {
+		return []domain.PlayerAggregate{}, nil
+	}
+	refs := make([]uint, 0, len(tournaments))
+	for _, tournament := range tournaments {
+		refs = append(refs, tournament.ID)
+	}
+	var rows []StandingModel
+	if err := r.db.WithContext(ctx).
+		Where("tournament_ref IN ?", refs).
+		Where("player_ref NOT IN (SELECT id FROM player_models WHERE merged_into_player_id IS NOT NULL)").
+		Order("id ASC").Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("list player standings for year %d: %w", year, err)
+	}
+	if len(rows) == 0 {
+		return []domain.PlayerAggregate{}, nil
+	}
+
+	playerRefs := make([]uint, 0, len(rows))
+	seenRefs := make(map[uint]struct{}, len(rows))
+	for _, row := range rows {
+		if _, ok := seenRefs[row.PlayerRef]; !ok {
+			seenRefs[row.PlayerRef] = struct{}{}
+			playerRefs = append(playerRefs, row.PlayerRef)
+		}
+	}
+	var players []PlayerModel
+	if err := r.db.WithContext(ctx).Where("id IN ?", playerRefs).Find(&players).Error; err != nil {
+		return nil, fmt.Errorf("load players for year %d: %w", year, err)
+	}
+	playerByRef := make(map[uint]PlayerModel, len(players))
+	for _, player := range players {
+		playerByRef[player.ID] = player
+	}
+
+	type aggregateState struct {
+		source           string
+		player           PlayerModel
+		tournaments      map[uint]struct{}
+		rows             int
+		totalPointsCents int64
+		pointsAvailable  bool
+		gamesPlayed      int
+		gamesAvailable   bool
+		goalDifference   int
+		goalsAvailable   bool
+	}
+	states := make(map[string]*aggregateState)
+	for _, row := range rows {
+		player, ok := playerByRef[row.PlayerRef]
+		if !ok || player.MergedIntoPlayerID != nil {
+			continue
+		}
+		key := row.Source + "\x00" + player.CanonicalNameKey
+		state := states[key]
+		if state == nil {
+			state = &aggregateState{source: row.Source, player: player, tournaments: make(map[uint]struct{}), pointsAvailable: true, gamesAvailable: true, goalsAvailable: true}
+			states[key] = state
+		}
+		state.rows++
+		state.tournaments[row.TournamentRef] = struct{}{}
+		if row.PointsCents == nil {
+			state.pointsAvailable = false
+		} else {
+			state.totalPointsCents += *row.PointsCents
+		}
+		if row.GamesPlayed == nil {
+			state.gamesAvailable = false
+		} else {
+			state.gamesPlayed += *row.GamesPlayed
+		}
+		if row.GoalDifference == nil {
+			state.goalsAvailable = false
+		} else {
+			state.goalDifference += *row.GoalDifference
+		}
+	}
+
+	ranking := make([]domain.PlayerAggregate, 0, len(states))
+	for _, state := range states {
+		aggregate := domain.PlayerAggregate{
+			Source: state.source, PlayerKey: state.player.CanonicalNameKey, PlayerName: state.player.DisplayName,
+			TournamentCount: len(state.tournaments), PointsAvailable: state.pointsAvailable && state.rows > 0,
+			GamesAvailable: state.gamesAvailable, GoalsAvailable: state.goalsAvailable,
+		}
+		if aggregate.PointsAvailable {
+			value := state.totalPointsCents
+			aggregate.TotalPointsCents = &value
+		}
+		if aggregate.GamesAvailable {
+			value := state.gamesPlayed
+			aggregate.GamesPlayed = &value
+		}
+		if aggregate.GoalsAvailable {
+			value := state.goalDifference
+			aggregate.GoalDifference = &value
+		}
+		if aggregate.PointsAvailable && aggregate.GamesAvailable && state.gamesPlayed > 0 {
+			value := roundCents(state.totalPointsCents, int64(state.gamesPlayed))
+			aggregate.PointsPerGameCents = &value
+		}
+		ranking = append(ranking, aggregate)
+	}
+	sortPlayerRanking(ranking)
+	return ranking, nil
+}
+
+// qualifiedRankingTournaments centralizes the inclusion/completion/standing
+// qualification shared by the available-year list and yearly values.
+func (r *Repository) qualifiedRankingTournaments(ctx context.Context, year *int) ([]TournamentModel, error) {
+	var models []TournamentModel
+	query := r.db.WithContext(ctx).
+		Where("included_in_ranking = ?", true).
+		Where("standings_sync_complete = ?", true).
+		Where("last_standings_sync_failed = ?", false).
+		Where("date IS NOT NULL")
+	if err := query.Find(&models).Error; err != nil {
+		return nil, fmt.Errorf("list ranking tournaments: %w", err)
+	}
+	if len(models) == 0 {
+		return []TournamentModel{}, nil
+	}
+	now := r.clock.Now()
+	location, err := time.LoadLocation(domain.RankingLocation)
+	if err != nil {
+		return nil, fmt.Errorf("load ranking timezone: %w", err)
+	}
+	candidates := make([]TournamentModel, 0, len(models))
+	for _, model := range models {
+		tournament := fromModel(model)
+		if !domain.IsTournamentCompleted(tournament, now) || model.Date == nil {
+			continue
+		}
+		if year != nil && model.Date.In(location).Year() != *year {
+			continue
+		}
+		candidates = append(candidates, model)
+	}
+	if len(candidates) == 0 {
+		return []TournamentModel{}, nil
+	}
+	refs := make([]uint, 0, len(candidates))
+	for _, model := range candidates {
+		refs = append(refs, model.ID)
+	}
+	var standingRefs []uint
+	if err := r.db.WithContext(ctx).Model(&StandingModel{}).
+		Where("tournament_ref IN ?", refs).
+		Group("tournament_ref").Pluck("tournament_ref", &standingRefs).Error; err != nil {
+		return nil, fmt.Errorf("find complete ranking standings: %w", err)
+	}
+	withStandings := make(map[uint]struct{}, len(standingRefs))
+	for _, ref := range standingRefs {
+		withStandings[ref] = struct{}{}
+	}
+	qualified := make([]TournamentModel, 0, len(candidates))
+	for _, model := range candidates {
+		if _, ok := withStandings[model.ID]; ok {
+			qualified = append(qualified, model)
+		}
+	}
+	return qualified, nil
+}
+
+func sortPlayerRanking(ranking []domain.PlayerAggregate) {
+	sort.SliceStable(ranking, func(i, j int) bool {
+		left, right := ranking[i], ranking[j]
+		if left.PointsAvailable != right.PointsAvailable {
+			return left.PointsAvailable
+		}
+		if compareOptionalInt64(left.TotalPointsCents, right.TotalPointsCents) != 0 {
+			return compareOptionalInt64(left.TotalPointsCents, right.TotalPointsCents) > 0
+		}
+		if compareOptionalInt64(left.PointsPerGameCents, right.PointsPerGameCents) != 0 {
+			return compareOptionalInt64(left.PointsPerGameCents, right.PointsPerGameCents) > 0
+		}
+		if compareOptionalInt(left.GoalDifference, right.GoalDifference) != 0 {
+			return compareOptionalInt(left.GoalDifference, right.GoalDifference) > 0
+		}
+		if left.TournamentCount != right.TournamentCount {
+			return left.TournamentCount > right.TournamentCount
+		}
+		if left.PlayerName != right.PlayerName {
+			return left.PlayerName < right.PlayerName
+		}
+		return left.PlayerKey < right.PlayerKey
+	})
+}
+
+func compareOptionalInt64(left, right *int64) int {
+	if left == nil && right == nil {
+		return 0
+	}
+	if left == nil {
+		return -1
+	}
+	if right == nil {
+		return 1
+	}
+	if *left < *right {
+		return -1
+	}
+	if *left > *right {
+		return 1
+	}
+	return 0
+}
+
+func compareOptionalInt(left, right *int) int {
+	if left == nil && right == nil {
+		return 0
+	}
+	if left == nil {
+		return -1
+	}
+	if right == nil {
+		return 1
+	}
+	if *left < *right {
+		return -1
+	}
+	if *left > *right {
+		return 1
+	}
+	return 0
+}
+
 func (r *Repository) UpsertStandingSnapshot(ctx context.Context, snapshot domain.StandingSnapshot) (result domain.StandingSyncResult, err error) {
 	if !snapshot.Complete {
 		return result, fmt.Errorf("refuse incomplete standings snapshot for tournament %s", snapshot.TournamentID)
