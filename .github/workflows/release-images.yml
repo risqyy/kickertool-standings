@@ -38,6 +38,10 @@ jobs:
         working-directory: backend
         run: go build ./...
 
+      - name: Smoke-test final backend image
+        shell: bash
+        run: bash ./scripts/smoke-test-backend-image.sh
+
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:

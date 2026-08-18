@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata"
 
 	"kickertool-ranking/internal/adapters"
 	"kickertool-ranking/internal/adapters/gormrepo"
