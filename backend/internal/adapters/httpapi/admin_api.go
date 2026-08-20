@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -29,8 +30,9 @@ func profileVersion(profile domain.PlayerProfile) string {
 const adminCSRFTokenCookie = "kickertool_admin_csrf"
 
 // AdminBasicAuth protects every administrative JSON endpoint.
-// Credentials are compared as SHA-256 digests in constant time and are never
-// placed in request context, response bodies, logs, or frontend data.
+// Credentials are compared as SHA-256 digests in constant time. Only the
+// authenticated username is carried in request context for audit attribution;
+// passwords never enter context, response bodies, logs, or frontend data.
 func AdminBasicAuth(next http.Handler, username, password string, logger *zerolog.Logger) http.Handler {
 	expectedUser := sha256.Sum256([]byte(username))
 	expectedPassword := sha256.Sum256([]byte(password))
@@ -47,17 +49,19 @@ func AdminBasicAuth(next http.Handler, username, password string, logger *zerolo
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), adminActorContextKey{}, user)))
 	})
 }
 
 type AdminAPIHandler struct {
-	tournaments ports.TournamentAdminRepository
-	directory   ports.PlayerDirectory
-	merger      ports.PlayerMergeService
-	logger      *zerolog.Logger
-	mu          sync.Mutex
-	plans       map[string]adminMergePlan
+	tournaments     ports.TournamentAdminRepository
+	directory       ports.PlayerDirectory
+	merger          ports.PlayerMergeService
+	corrections     ports.ManualRankingCorrectionRepository
+	logger          *zerolog.Logger
+	mu              sync.Mutex
+	plans           map[string]adminMergePlan
+	correctionPlans map[string]manualCorrectionPlan
 }
 
 type adminMergePlan struct {
@@ -70,8 +74,33 @@ type adminMergePlan struct {
 	Completed          *domain.MergeResult
 }
 
-func NewAdminAPIHandler(tournaments ports.TournamentAdminRepository, directory ports.PlayerDirectory, merger ports.PlayerMergeService, logger *zerolog.Logger) *AdminAPIHandler {
-	return &AdminAPIHandler{tournaments: tournaments, directory: directory, merger: merger, logger: logger, plans: make(map[string]adminMergePlan)}
+type manualCorrectionPlan struct {
+	PlayerID         uint
+	Input            domain.ManualRankingCorrectionInput
+	ExpectedVersion  int64
+	ExpiresAt        time.Time
+	Preview          domain.ManualRankingCorrectionPreview
+	StateFingerprint string
+	Completed        *domain.ManualRankingCorrectionChange
+}
+
+type adminActorContextKey struct{}
+
+func adminActor(ctx context.Context) string {
+	if value, ok := ctx.Value(adminActorContextKey{}).(string); ok && strings.TrimSpace(value) != "" {
+		return strings.TrimSpace(value)
+	}
+	return "admin"
+}
+
+func NewAdminAPIHandler(tournaments ports.TournamentAdminRepository, directory ports.PlayerDirectory, merger ports.PlayerMergeService, logger *zerolog.Logger, correctionRepositories ...ports.ManualRankingCorrectionRepository) *AdminAPIHandler {
+	var corrections ports.ManualRankingCorrectionRepository
+	if len(correctionRepositories) > 0 {
+		corrections = correctionRepositories[0]
+	} else if value, ok := tournaments.(ports.ManualRankingCorrectionRepository); ok {
+		corrections = value
+	}
+	return &AdminAPIHandler{tournaments: tournaments, directory: directory, merger: merger, corrections: corrections, logger: logger, plans: make(map[string]adminMergePlan), correctionPlans: make(map[string]manualCorrectionPlan)}
 }
 
 func (h *AdminAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -95,6 +124,14 @@ func (h *AdminAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.setInclusion(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/admin/players/search":
 		h.playerSearch(w, r)
+	case r.Method == http.MethodGet && h.isCorrectionListPath(r.URL.Path):
+		h.correctionList(w, r)
+	case r.Method == http.MethodPost && h.isCorrectionPreviewPath(r.URL.Path):
+		h.correctionPreview(w, r)
+	case r.Method == http.MethodPost && h.isCorrectionConfirmPath(r.URL.Path):
+		h.correctionConfirm(w, r)
+	case r.Method == http.MethodPost && h.isCorrectionRevokePath(r.URL.Path):
+		h.correctionRevoke(w, r)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/admin/players/"):
 		h.playerDetail(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/admin/players/merge/preview":
@@ -392,18 +429,19 @@ func dashboardDTO(value domain.Dashboard) dashboardDTOValue {
 }
 
 type playerDTO struct {
-	ID                 uint     `json:"id"`
-	DisplayName        string   `json:"displayName"`
-	CanonicalNameKey   string   `json:"canonicalNameKey"`
-	Aliases            []string `json:"aliases"`
-	MatchedAlias       string   `json:"matchedAlias,omitempty"`
-	Active             bool     `json:"active"`
-	MergedIntoPlayerID *uint    `json:"mergedIntoPlayerId,omitempty"`
-	TournamentCount    int      `json:"tournamentCount"`
-	GamesPlayed        *int     `json:"gamesPlayed"`
-	TotalPointsCents   *int64   `json:"totalPointsCents"`
-	PointsPerGameCents *int64   `json:"pointsPerGameCents"`
-	GoalDifference     *int     `json:"goalDifference"`
+	ID                       uint     `json:"id"`
+	DisplayName              string   `json:"displayName"`
+	CanonicalNameKey         string   `json:"canonicalNameKey"`
+	Aliases                  []string `json:"aliases"`
+	MatchedAlias             string   `json:"matchedAlias,omitempty"`
+	Active                   bool     `json:"active"`
+	MergedIntoPlayerID       *uint    `json:"mergedIntoPlayerId,omitempty"`
+	TournamentCount          int      `json:"tournamentCount"`
+	GamesPlayed              *int     `json:"gamesPlayed"`
+	TotalPointsCents         *int64   `json:"totalPointsCents"`
+	PointsPerGameCents       *int64   `json:"pointsPerGameCents"`
+	GoalDifference           *int     `json:"goalDifference"`
+	RankingCorrectionVersion int64    `json:"rankingCorrectionVersion"`
 }
 
 func playerDTOFrom(profile domain.PlayerProfile) playerDTO {
@@ -411,7 +449,7 @@ func playerDTOFrom(profile domain.PlayerProfile) playerDTO {
 	for _, alias := range profile.Aliases {
 		aliases = append(aliases, alias.DisplayName)
 	}
-	return playerDTO{ID: profile.ID, DisplayName: profile.DisplayName, CanonicalNameKey: profile.CanonicalNameKey, Aliases: aliases, MatchedAlias: profile.MatchedAlias, Active: profile.Active, MergedIntoPlayerID: profile.MergedIntoPlayerID, TournamentCount: profile.Aggregate.TournamentCount, GamesPlayed: profile.Aggregate.GamesPlayed, TotalPointsCents: profile.Aggregate.TotalPointsCents, PointsPerGameCents: profile.Aggregate.PointsPerGameCents, GoalDifference: profile.Aggregate.GoalDifference}
+	return playerDTO{ID: profile.ID, DisplayName: profile.DisplayName, CanonicalNameKey: profile.CanonicalNameKey, Aliases: aliases, MatchedAlias: profile.MatchedAlias, Active: profile.Active, MergedIntoPlayerID: profile.MergedIntoPlayerID, RankingCorrectionVersion: profile.RankingCorrectionVersion, TournamentCount: profile.Aggregate.TournamentCount, GamesPlayed: profile.Aggregate.GamesPlayed, TotalPointsCents: profile.Aggregate.TotalPointsCents, PointsPerGameCents: profile.Aggregate.PointsPerGameCents, GoalDifference: profile.Aggregate.GoalDifference}
 }
 
 func mergeResultDTO(result domain.MergeResult) map[string]any {

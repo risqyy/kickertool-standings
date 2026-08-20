@@ -2,6 +2,9 @@ package gormrepo
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -10,6 +13,54 @@ import (
 	"gorm.io/gorm"
 	"kickertool-ranking/internal/domain"
 )
+
+// PlayerStateFingerprint includes source rows, inclusion state and manual
+// correction history. It lets an admin preview detect a crawl, inclusion
+// change or merge that does not change the visible aggregate immediately.
+func (r *Repository) PlayerStateFingerprint(ctx context.Context, playerID uint) (string, error) {
+	root, err := r.rootPlayer(ctx, playerID)
+	if err != nil {
+		return "", err
+	}
+	return playerStateFingerprintTx(r.db.WithContext(ctx), root)
+}
+
+func playerStateFingerprintTx(tx *gorm.DB, root PlayerModel) (string, error) {
+	var rows []StandingModel
+	if err := tx.Where("player_ref = ?", root.ID).Order("id ASC").Find(&rows).Error; err != nil {
+		return "", err
+	}
+	var corrections []ManualRankingCorrectionModel
+	if err := tx.Where("player_ref = ?", root.ID).Order("id ASC").Find(&corrections).Error; err != nil {
+		return "", err
+	}
+	var tournaments []TournamentModel
+	ids := make([]uint, 0, len(rows))
+	seen := make(map[uint]struct{}, len(rows))
+	for _, row := range rows {
+		if _, ok := seen[row.TournamentRef]; !ok {
+			seen[row.TournamentRef] = struct{}{}
+			ids = append(ids, row.TournamentRef)
+		}
+	}
+	if len(ids) > 0 {
+		if err := tx.Where("id IN ?", ids).Order("id ASC").Find(&tournaments).Error; err != nil {
+			return "", err
+		}
+	}
+	payload := struct {
+		Player      PlayerModel
+		Rows        []StandingModel
+		Corrections []ManualRankingCorrectionModel
+		Tournaments []TournamentModel
+	}{Player: root, Rows: rows, Corrections: corrections, Tournaments: tournaments}
+	serialized, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(serialized)
+	return hex.EncodeToString(digest[:]), nil
+}
 
 func (r *Repository) GetPlayerProfile(ctx context.Context, playerID uint) (domain.PlayerProfile, error) {
 	var requested PlayerModel
@@ -103,8 +154,9 @@ func (r *Repository) profileForRoot(ctx context.Context, requestedID uint, reque
 	profile := domain.PlayerProfile{
 		ID: root.ID, RequestedPlayerID: requestedID, CanonicalNameKey: root.CanonicalNameKey,
 		DisplayName: root.DisplayName, Active: root.MergedIntoPlayerID == nil && requested.MergedIntoPlayerID == nil,
-		MergedIntoPlayerID: requested.MergedIntoPlayerID,
-		Aliases:            make([]domain.PlayerAlias, 0, len(aliases)),
+		MergedIntoPlayerID:       requested.MergedIntoPlayerID,
+		RankingCorrectionVersion: root.RankingCorrectionVersion,
+		Aliases:                  make([]domain.PlayerAlias, 0, len(aliases)),
 	}
 	for _, alias := range aliases {
 		profile.Aliases = append(profile.Aliases, domain.PlayerAlias{NameKey: alias.NameKey, DisplayName: alias.DisplayName})
@@ -118,17 +170,13 @@ func (r *Repository) profileForRoot(ctx context.Context, requestedID uint, reque
 }
 
 func (r *Repository) aggregateForPlayer(ctx context.Context, player PlayerModel) (domain.PlayerAggregate, error) {
-	var rows []StandingModel
-	if err := r.db.WithContext(ctx).Joins("JOIN tournament_models ON tournament_models.id = standing_models.tournament_ref").Where("standing_models.player_ref = ? AND tournament_models.included_in_ranking = ?", player.ID, true).Find(&rows).Error; err != nil {
-		return domain.PlayerAggregate{}, err
-	}
-	return aggregateFromRows(rows, player), nil
+	return aggregateForPlayerTx(r.db.WithContext(ctx), player, r.clock.Now())
 }
 
-func aggregateFromRows(rows []StandingModel, player PlayerModel) domain.PlayerAggregate {
+func aggregateFromRows(rows []StandingModel, player PlayerModel) (domain.PlayerAggregate, error) {
 	result := domain.PlayerAggregate{PlayerKey: player.CanonicalNameKey, PlayerName: player.DisplayName, RecalculatedAt: player.UpdatedAt}
 	if len(rows) == 0 {
-		return result
+		return result, nil
 	}
 	tournaments := make(map[string]struct{})
 	pointsAvailable, gamesAvailable, goalsAvailable := true, true, true
@@ -139,17 +187,29 @@ func aggregateFromRows(rows []StandingModel, player PlayerModel) domain.PlayerAg
 		if row.PointsCents == nil {
 			pointsAvailable = false
 		} else {
-			totalPoints += *row.PointsCents
+			var err error
+			totalPoints, err = addInt64Checked(totalPoints, *row.PointsCents)
+			if err != nil {
+				return domain.PlayerAggregate{}, err
+			}
 		}
 		if row.GamesPlayed == nil {
 			gamesAvailable = false
 		} else {
-			totalGames += *row.GamesPlayed
+			var err error
+			totalGames, err = addIntChecked(totalGames, *row.GamesPlayed)
+			if err != nil {
+				return domain.PlayerAggregate{}, err
+			}
 		}
 		if row.GoalDifference == nil {
 			goalsAvailable = false
 		} else {
-			totalGoals += *row.GoalDifference
+			var err error
+			totalGoals, err = addIntChecked(totalGoals, *row.GoalDifference)
+			if err != nil {
+				return domain.PlayerAggregate{}, err
+			}
 		}
 	}
 	result.TournamentCount = len(tournaments)
@@ -167,5 +227,5 @@ func aggregateFromRows(rows []StandingModel, player PlayerModel) domain.PlayerAg
 		ppg := roundCents(totalPoints, int64(totalGames))
 		result.PointsPerGameCents = &ppg
 	}
-	return result
+	return result, nil
 }

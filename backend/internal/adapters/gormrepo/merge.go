@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 	"kickertool-ranking/internal/domain"
@@ -40,12 +41,12 @@ func (r *Repository) MergePlayers(ctx context.Context, sourcePlayerID, targetPla
 			SourceDisplayName: sourceRoot.DisplayName, TargetDisplayName: targetRoot.DisplayName,
 			DryRun: options.DryRun, MergedAt: r.clock.Now(),
 		}
-		if aggregate, err := aggregateForTx(tx, sourceRoot); err != nil {
+		if aggregate, err := aggregateForTx(tx, sourceRoot, r.clock.Now()); err != nil {
 			return err
 		} else {
 			result.SourceBefore = &aggregate
 		}
-		if aggregate, err := aggregateForTx(tx, targetRoot); err != nil {
+		if aggregate, err := aggregateForTx(tx, targetRoot, r.clock.Now()); err != nil {
 			return err
 		} else {
 			result.TargetBefore = &aggregate
@@ -68,6 +69,11 @@ func (r *Repository) MergePlayers(ctx context.Context, sourcePlayerID, targetPla
 		if err := transferAllocationRows(tx, sourceRoot.ID, targetRoot.ID, &result); err != nil {
 			return err
 		}
+		// Corrections are player-owned audit records. Transfer their ownership
+		// with the source tombstone so a merge cannot lose or double-count them.
+		if err := tx.Model(&ManualRankingCorrectionModel{}).Where("player_ref = ?", sourceRoot.ID).Updates(map[string]any{"player_ref": targetRoot.ID, "player_key": targetRoot.CanonicalNameKey}).Error; err != nil {
+			return fmt.Errorf("transfer ranking corrections: %w", err)
+		}
 
 		if err := tx.Model(&sourceRoot).Updates(map[string]any{
 			"merged_into_player_id": targetRoot.ID,
@@ -85,7 +91,10 @@ func (r *Repository) MergePlayers(ctx context.Context, sourcePlayerID, targetPla
 			}
 			result.RecalculatedAggregates++
 		}
-		if aggregate, err := aggregateForTx(tx, targetRoot); err != nil {
+		if err := r.recalculatePlayerAggregates(tx, targetRoot, result.MergedAt); err != nil {
+			return err
+		}
+		if aggregate, err := aggregateForTx(tx, targetRoot, r.clock.Now()); err != nil {
 			return err
 		} else {
 			result.TargetAfter = &aggregate
@@ -113,12 +122,8 @@ func (r *Repository) MergePlayers(ctx context.Context, sourcePlayerID, targetPla
 	return result, err
 }
 
-func aggregateForTx(tx *gorm.DB, player PlayerModel) (domain.PlayerAggregate, error) {
-	var rows []StandingModel
-	if err := tx.Where("player_ref = ?", player.ID).Find(&rows).Error; err != nil {
-		return domain.PlayerAggregate{}, err
-	}
-	return aggregateFromRows(rows, player), nil
+func aggregateForTx(tx *gorm.DB, player PlayerModel, cutoffs ...time.Time) (domain.PlayerAggregate, error) {
+	return aggregateForPlayerTx(tx, player, cutoffs...)
 }
 
 func transferAliases(tx *gorm.DB, sourceID, targetID uint, result *domain.MergeResult) error {

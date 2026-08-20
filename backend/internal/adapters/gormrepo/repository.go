@@ -54,14 +54,15 @@ type TournamentModel struct {
 }
 
 type PlayerModel struct {
-	ID                 uint   `gorm:"primaryKey"`
-	CanonicalNameKey   string `gorm:"not null;uniqueIndex:ux_player_canonical_name_key"`
-	DisplayName        string `gorm:"not null"`
-	MergedIntoPlayerID *uint  `gorm:"index"`
-	MergedAt           *time.Time
-	LastSeenAt         time.Time `gorm:"not null"`
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	ID                       uint   `gorm:"primaryKey"`
+	CanonicalNameKey         string `gorm:"not null;uniqueIndex:ux_player_canonical_name_key"`
+	DisplayName              string `gorm:"not null"`
+	MergedIntoPlayerID       *uint  `gorm:"index"`
+	MergedAt                 *time.Time
+	LastSeenAt               time.Time `gorm:"not null"`
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
+	RankingCorrectionVersion int64 `gorm:"not null;default:0"`
 }
 
 type PlayerNameAliasModel struct {
@@ -243,6 +244,52 @@ type TournamentInclusionAuditModel struct {
 	ChangedAt        time.Time `gorm:"not null;index"`
 }
 
+// ManualRankingCorrectionModel is a source-independent additive adjustment.
+// Rows are retained forever; revocation only changes the current status and
+// appends a signed revision row below.
+type ManualRankingCorrectionModel struct {
+	ID                     uint      `gorm:"primaryKey"`
+	PlayerRef              uint      `gorm:"not null;index"`
+	PlayerKey              string    `gorm:"not null;index"`
+	EffectiveDate          time.Time `gorm:"not null;index"`
+	EffectiveYear          int       `gorm:"not null;index"`
+	TournamentCountDelta   int       `gorm:"not null"`
+	GamesPlayedDelta       int       `gorm:"not null"`
+	PointsCentsDelta       int64     `gorm:"not null"`
+	GoalDifferenceDelta    int       `gorm:"not null"`
+	Reason                 string    `gorm:"not null"`
+	Administrator          string    `gorm:"not null"`
+	CreatedAt              time.Time `gorm:"not null;index"`
+	Status                 string    `gorm:"not null;index"`
+	RevokedAt              *time.Time
+	RevokedBy              string
+	RevocationReason       string
+	Revision               int64       `gorm:"not null;default:1"`
+	Version                int64       `gorm:"not null;default:1"`
+	SupersedesCorrectionID *uint       `gorm:"index"`
+	ReplacedByCorrectionID *uint       `gorm:"index"`
+	Player                 PlayerModel `gorm:"foreignKey:PlayerRef;constraint:OnUpdate:CASCADE,OnDelete:RESTRICT"`
+}
+
+// ManualRankingCorrectionRevisionModel is append-only. Hash and PreviousHash
+// make accidental edits/deletions detectable when the audit trail is exported.
+type ManualRankingCorrectionRevisionModel struct {
+	ID                   uint      `gorm:"primaryKey"`
+	CorrectionID         uint      `gorm:"not null;index"`
+	Revision             int64     `gorm:"not null"`
+	Action               string    `gorm:"not null"`
+	EffectiveDate        time.Time `gorm:"not null"`
+	TournamentCountDelta int       `gorm:"not null"`
+	GamesPlayedDelta     int       `gorm:"not null"`
+	PointsCentsDelta     int64     `gorm:"not null"`
+	GoalDifferenceDelta  int       `gorm:"not null"`
+	Reason               string    `gorm:"not null"`
+	Administrator        string    `gorm:"not null"`
+	OccurredAt           time.Time `gorm:"not null;index"`
+	PreviousHash         string
+	Hash                 string `gorm:"not null;uniqueIndex"`
+}
+
 type Repository struct {
 	db    *gorm.DB
 	clock ports.Clock
@@ -253,7 +300,7 @@ func OpenSQLite(path string, clock ports.Clock) (*Repository, *gorm.DB, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	if err := db.AutoMigrate(&TournamentModel{}, &DisciplineModel{}, &StageModel{}, &GroupModel{}, &EntryModel{}, &PlayerModel{}, &PlayerNameAliasModel{}, &SourcePlayerIdentityModel{}, &EntryMembershipModel{}, &GroupStandingModel{}, &AllocationModel{}, &StandingModel{}, &PlayerAggregateModel{}, &PlayerMergeAuditModel{}, &TournamentInclusionAuditModel{}); err != nil {
+	if err := db.AutoMigrate(&TournamentModel{}, &DisciplineModel{}, &StageModel{}, &GroupModel{}, &EntryModel{}, &PlayerModel{}, &PlayerNameAliasModel{}, &SourcePlayerIdentityModel{}, &EntryMembershipModel{}, &GroupStandingModel{}, &AllocationModel{}, &StandingModel{}, &PlayerAggregateModel{}, &PlayerMergeAuditModel{}, &TournamentInclusionAuditModel{}, &ManualRankingCorrectionModel{}, &ManualRankingCorrectionRevisionModel{}); err != nil {
 		return nil, db, fmt.Errorf("auto migrate tournaments: %w", err)
 	}
 	if err := ensurePlayerAliases(db); err != nil {
@@ -267,7 +314,7 @@ func New(db *gorm.DB, clock ports.Clock) (*Repository, error) {
 	if db == nil {
 		return nil, errors.New("gorm db is required")
 	}
-	if err := db.AutoMigrate(&TournamentModel{}, &DisciplineModel{}, &StageModel{}, &GroupModel{}, &EntryModel{}, &PlayerModel{}, &PlayerNameAliasModel{}, &SourcePlayerIdentityModel{}, &EntryMembershipModel{}, &GroupStandingModel{}, &AllocationModel{}, &StandingModel{}, &PlayerAggregateModel{}, &PlayerMergeAuditModel{}, &TournamentInclusionAuditModel{}); err != nil {
+	if err := db.AutoMigrate(&TournamentModel{}, &DisciplineModel{}, &StageModel{}, &GroupModel{}, &EntryModel{}, &PlayerModel{}, &PlayerNameAliasModel{}, &SourcePlayerIdentityModel{}, &EntryMembershipModel{}, &GroupStandingModel{}, &AllocationModel{}, &StandingModel{}, &PlayerAggregateModel{}, &PlayerMergeAuditModel{}, &TournamentInclusionAuditModel{}, &ManualRankingCorrectionModel{}, &ManualRankingCorrectionRevisionModel{}); err != nil {
 		return nil, fmt.Errorf("auto migrate tournaments: %w", err)
 	}
 	if err := ensurePlayerAliases(db); err != nil {
@@ -402,27 +449,10 @@ func (r *Repository) FindBySourceID(ctx context.Context, source, sourceID string
 }
 
 func (r *Repository) ListPlayerRanking(ctx context.Context) ([]domain.PlayerAggregate, error) {
-	var models []PlayerAggregateModel
-	err := r.db.WithContext(ctx).
-		Where("player_ref NOT IN (SELECT id FROM player_models WHERE merged_into_player_id IS NOT NULL)").
-		Where("tournament_count > 0").
-		Order("points_available DESC").
-		Order("total_points_cents DESC").
-		Order("points_per_game_cents DESC").
-		Order("goal_difference DESC").
-		Order("tournament_count DESC").
-		Order("player_name ASC").
-		Order("player_key ASC").
-		Find(&models).Error
-	if err != nil {
-		return nil, fmt.Errorf("list player ranking: %w", err)
-	}
-
-	ranking := make([]domain.PlayerAggregate, 0, len(models))
-	for _, model := range models {
-		ranking = append(ranking, fromAggregateModel(model))
-	}
-	return ranking, nil
+	// Read the current source rows and active corrections together. The
+	// materialized aggregate remains a cache, while this reader makes a future
+	// effective date visible without waiting for another crawl/recalculation.
+	return r.listCurrentRanking(ctx, r.clock.Now())
 }
 
 // ListAvailableRankingYears returns calendar years that have at least one
@@ -443,6 +473,14 @@ func (r *Repository) ListAvailableRankingYears(ctx context.Context) ([]int, erro
 			seen[tournament.Date.In(location).Year()] = struct{}{}
 		}
 	}
+	now := r.clock.Now()
+	var corrections []ManualRankingCorrectionModel
+	if err := r.db.WithContext(ctx).Where("status = ? AND effective_date <= ?", manualCorrectionActive, now).Find(&corrections).Error; err != nil {
+		return nil, fmt.Errorf("list correction years: %w", err)
+	}
+	for _, correction := range corrections {
+		seen[correction.EffectiveDate.In(location).Year()] = struct{}{}
+	}
 	years := make([]int, 0, len(seen))
 	for year := range seen {
 		years = append(years, year)
@@ -451,120 +489,20 @@ func (r *Repository) ListAvailableRankingYears(ctx context.Context) ([]int, erro
 	return years, nil
 }
 
-// ListPlayerRankingForYear calculates a period ranking from the source
-// standings instead of the cumulative materialization. This keeps every
-// metric (including tournament count and points per game) scoped to exactly
-// the same qualified tournaments.
+// ListPlayerRankingForYear calculates a period ranking from the shared
+// source/correction aggregation. Effective dates after the current clock are
+// excluded, so a ranking changes at the effective instant without a crawl.
 func (r *Repository) ListPlayerRankingForYear(ctx context.Context, year int) ([]domain.PlayerAggregate, error) {
-	tournaments, err := r.qualifiedRankingTournaments(ctx, &year)
+	rows, err := r.listRankingRowsForYear(ctx, year)
 	if err != nil {
 		return nil, err
 	}
-	if len(tournaments) == 0 {
-		return []domain.PlayerAggregate{}, nil
+	now := r.clock.Now()
+	corrections, err := r.activeCorrections(ctx, now, &year, nil)
+	if err != nil {
+		return nil, err
 	}
-	refs := make([]uint, 0, len(tournaments))
-	for _, tournament := range tournaments {
-		refs = append(refs, tournament.ID)
-	}
-	var rows []StandingModel
-	if err := r.db.WithContext(ctx).
-		Where("tournament_ref IN ?", refs).
-		Where("player_ref NOT IN (SELECT id FROM player_models WHERE merged_into_player_id IS NOT NULL)").
-		Order("id ASC").Find(&rows).Error; err != nil {
-		return nil, fmt.Errorf("list player standings for year %d: %w", year, err)
-	}
-	if len(rows) == 0 {
-		return []domain.PlayerAggregate{}, nil
-	}
-
-	playerRefs := make([]uint, 0, len(rows))
-	seenRefs := make(map[uint]struct{}, len(rows))
-	for _, row := range rows {
-		if _, ok := seenRefs[row.PlayerRef]; !ok {
-			seenRefs[row.PlayerRef] = struct{}{}
-			playerRefs = append(playerRefs, row.PlayerRef)
-		}
-	}
-	var players []PlayerModel
-	if err := r.db.WithContext(ctx).Where("id IN ?", playerRefs).Find(&players).Error; err != nil {
-		return nil, fmt.Errorf("load players for year %d: %w", year, err)
-	}
-	playerByRef := make(map[uint]PlayerModel, len(players))
-	for _, player := range players {
-		playerByRef[player.ID] = player
-	}
-
-	type aggregateState struct {
-		source           string
-		player           PlayerModel
-		tournaments      map[uint]struct{}
-		rows             int
-		totalPointsCents int64
-		pointsAvailable  bool
-		gamesPlayed      int
-		gamesAvailable   bool
-		goalDifference   int
-		goalsAvailable   bool
-	}
-	states := make(map[string]*aggregateState)
-	for _, row := range rows {
-		player, ok := playerByRef[row.PlayerRef]
-		if !ok || player.MergedIntoPlayerID != nil {
-			continue
-		}
-		key := row.Source + "\x00" + player.CanonicalNameKey
-		state := states[key]
-		if state == nil {
-			state = &aggregateState{source: row.Source, player: player, tournaments: make(map[uint]struct{}), pointsAvailable: true, gamesAvailable: true, goalsAvailable: true}
-			states[key] = state
-		}
-		state.rows++
-		state.tournaments[row.TournamentRef] = struct{}{}
-		if row.PointsCents == nil {
-			state.pointsAvailable = false
-		} else {
-			state.totalPointsCents += *row.PointsCents
-		}
-		if row.GamesPlayed == nil {
-			state.gamesAvailable = false
-		} else {
-			state.gamesPlayed += *row.GamesPlayed
-		}
-		if row.GoalDifference == nil {
-			state.goalsAvailable = false
-		} else {
-			state.goalDifference += *row.GoalDifference
-		}
-	}
-
-	ranking := make([]domain.PlayerAggregate, 0, len(states))
-	for _, state := range states {
-		aggregate := domain.PlayerAggregate{
-			Source: state.source, PlayerKey: state.player.CanonicalNameKey, PlayerName: state.player.DisplayName,
-			TournamentCount: len(state.tournaments), PointsAvailable: state.pointsAvailable && state.rows > 0,
-			GamesAvailable: state.gamesAvailable, GoalsAvailable: state.goalsAvailable,
-		}
-		if aggregate.PointsAvailable {
-			value := state.totalPointsCents
-			aggregate.TotalPointsCents = &value
-		}
-		if aggregate.GamesAvailable {
-			value := state.gamesPlayed
-			aggregate.GamesPlayed = &value
-		}
-		if aggregate.GoalsAvailable {
-			value := state.goalDifference
-			aggregate.GoalDifference = &value
-		}
-		if aggregate.PointsAvailable && aggregate.GamesAvailable && state.gamesPlayed > 0 {
-			value := roundCents(state.totalPointsCents, int64(state.gamesPlayed))
-			aggregate.PointsPerGameCents = &value
-		}
-		ranking = append(ranking, aggregate)
-	}
-	sortPlayerRanking(ranking)
-	return ranking, nil
+	return r.aggregateRankingRows(ctx, rows, corrections)
 }
 
 // qualifiedRankingTournaments centralizes the inclusion/completion/standing
@@ -1030,6 +968,14 @@ func (r *Repository) recalculateAggregate(tx *gorm.DB, source, playerKey string,
 	if err := tx.Joins("JOIN tournament_models ON tournament_models.id = standing_models.tournament_ref").Where("standing_models.source = ? AND standing_models.player_key = ? AND tournament_models.included_in_ranking = ?", source, playerKey, true).Find(&rows).Error; err != nil {
 		return fmt.Errorf("load standings for aggregate %s: %w", playerKey, err)
 	}
+	var player PlayerModel
+	if err := tx.Where("canonical_name_key = ?", playerKey).First(&player).Error; err != nil {
+		return fmt.Errorf("find aggregate player %s: %w", playerKey, err)
+	}
+	var corrections []ManualRankingCorrectionModel
+	if err := tx.Where("player_ref = ? AND status = ? AND effective_date <= ?", player.ID, manualCorrectionActive, now).Order("id ASC").Find(&corrections).Error; err != nil {
+		return fmt.Errorf("load ranking corrections for aggregate %s: %w", playerKey, err)
+	}
 	tournaments := make(map[string]struct{})
 	var totalCents int64
 	pointsAvailable := len(rows) > 0
@@ -1040,29 +986,77 @@ func (r *Repository) recalculateAggregate(tx *gorm.DB, source, playerKey string,
 	for i := range rows {
 		tournaments[rows[i].TournamentID] = struct{}{}
 		if rows[i].PointsCents != nil {
-			totalCents += *rows[i].PointsCents
+			var err error
+			totalCents, err = addInt64Checked(totalCents, *rows[i].PointsCents)
+			if err != nil {
+				return err
+			}
 		} else {
 			pointsAvailable = false
 		}
 		if rows[i].GamesPlayed == nil {
 			gamesAvailable = false
 		} else {
-			gamesTotal += *rows[i].GamesPlayed
+			var err error
+			gamesTotal, err = addIntChecked(gamesTotal, *rows[i].GamesPlayed)
+			if err != nil {
+				return err
+			}
 		}
 		if rows[i].GoalDifference == nil {
 			goalsAvailable = false
 		} else {
-			goalDifferenceTotal += *rows[i].GoalDifference
+			var err error
+			goalDifferenceTotal, err = addIntChecked(goalDifferenceTotal, *rows[i].GoalDifference)
+			if err != nil {
+				return err
+			}
 		}
 	}
-	var player PlayerModel
-	if err := tx.Where("canonical_name_key = ?", playerKey).First(&player).Error; err != nil {
-		return fmt.Errorf("find aggregate player %s: %w", playerKey, err)
+	correctionsOnly := len(rows) == 0
+	for _, correction := range corrections {
+		if correctionsOnly || pointsAvailable {
+			var err error
+			totalCents, err = addInt64Checked(totalCents, correction.PointsCentsDelta)
+			if err != nil {
+				return err
+			}
+		}
+		if correctionsOnly || gamesAvailable {
+			var err error
+			gamesTotal, err = addIntChecked(gamesTotal, correction.GamesPlayedDelta)
+			if err != nil {
+				return err
+			}
+		}
+		if correctionsOnly || goalsAvailable {
+			var err error
+			goalDifferenceTotal, err = addIntChecked(goalDifferenceTotal, correction.GoalDifferenceDelta)
+			if err != nil {
+				return err
+			}
+		}
+		// A correction is an explicit contribution to the count, while source
+		// standings continue to define the de-duplicated tournament base.
+		if correction.TournamentCountDelta != 0 {
+			// Applied below as a scalar to keep the tournament set untouched.
+		}
+	}
+	tournamentCount := len(tournaments)
+	for _, correction := range corrections {
+		var err error
+		tournamentCount, err = addIntChecked(tournamentCount, correction.TournamentCountDelta)
+		if err != nil {
+			return err
+		}
+	}
+	if correctionsOnly {
+		pointsAvailable = len(corrections) > 0
 	}
 	var aggregate PlayerAggregateModel
 	findErr := tx.Where("source = ? AND player_key = ?", source, playerKey).First(&aggregate).Error
 	model := PlayerAggregateModel{Source: source, PlayerKey: playerKey, PlayerRef: player.ID, PlayerName: player.DisplayName,
-		TournamentCount: len(tournaments), PointsAvailable: pointsAvailable,
+		TournamentCount: tournamentCount, PointsAvailable: pointsAvailable,
 		GamesAvailable: gamesAvailable, GoalsAvailable: goalsAvailable, RecalculatedAt: now}
 	if pointsAvailable {
 		model.TotalPointsCents = &totalCents
@@ -1161,10 +1155,30 @@ func roundCents(totalCents, games int64) int64 {
 	if remainder < 0 {
 		return -roundCents(-totalCents, games)
 	}
-	if remainder*2 >= games {
+	if remainder >= games-remainder {
 		quotient++
 	}
 	return quotient
+}
+
+var errAggregateOverflow = errors.New("ranking aggregate arithmetic overflow")
+
+func addIntChecked(left, right int) (int, error) {
+	max := int(^uint(0) >> 1)
+	min := -max - 1
+	if (right > 0 && left > max-right) || (right < 0 && left < min-right) {
+		return 0, errAggregateOverflow
+	}
+	return left + right, nil
+}
+
+func addInt64Checked(left, right int64) (int64, error) {
+	max := int64(^uint64(0) >> 1)
+	min := -max - 1
+	if (right > 0 && left > max-right) || (right < 0 && left < min-right) {
+		return 0, errAggregateOverflow
+	}
+	return left + right, nil
 }
 
 func toModel(t domain.Tournament) *TournamentModel {

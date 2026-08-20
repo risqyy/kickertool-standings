@@ -1,8 +1,8 @@
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
-import { LayoutDashboard, ListChecks, LogOut, Merge, ShieldCheck, Trophy } from 'lucide-react'
+import { ClipboardPenLine, LayoutDashboard, ListChecks, LogOut, Merge, ShieldCheck, Trophy } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
-const links = [{ to: '/admin', label: 'Übersicht', icon: LayoutDashboard, end: true }, { to: '/admin/tournaments', label: 'Turniere', icon: ListChecks }, { to: '/admin/players/merge', label: 'Spieler zusammenführen', icon: Merge }]
+const links = [{ to: '/admin', label: 'Übersicht', icon: LayoutDashboard, end: true }, { to: '/admin/tournaments', label: 'Turniere', icon: ListChecks }, { to: '/admin/players/merge', label: 'Spieler zusammenführen', icon: Merge }, { to: '/admin/players/corrections', label: 'Ranking korrigieren', icon: ClipboardPenLine }]
 
 export function AdminLayout() {
   const location = useLocation()

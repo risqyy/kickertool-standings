@@ -58,6 +58,13 @@ type PeriodRankingReader interface {
 	ListAvailableRankingYears(ctx context.Context) ([]int, error)
 }
 
+// SnapshotRankingReader is used by audit/comparison views. The boundary is
+// exclusive: a correction effective exactly at the newest tournament belongs
+// to the current snapshot, not the immediately preceding one.
+type SnapshotRankingReader interface {
+	ListPlayerRankingBefore(ctx context.Context, cutoff time.Time) ([]domain.PlayerAggregate, error)
+}
+
 type PlayerMergeService interface {
 	MergePlayers(ctx context.Context, sourcePlayerID, targetPlayerID uint, options domain.PlayerMergeOptions) (domain.MergeResult, error)
 }
@@ -65,6 +72,21 @@ type PlayerMergeService interface {
 type PlayerDirectory interface {
 	SearchPlayers(ctx context.Context, query string) ([]domain.PlayerProfile, error)
 	GetPlayerProfile(ctx context.Context, playerID uint) (domain.PlayerProfile, error)
+}
+
+// ManualRankingCorrectionRepository stores immutable correction history and
+// exposes transactional preview/confirm/revoke operations.
+type ManualRankingCorrectionRepository interface {
+	PreviewManualRankingCorrection(ctx context.Context, input domain.ManualRankingCorrectionInput) (domain.ManualRankingCorrectionPreview, error)
+	CreateManualRankingCorrection(ctx context.Context, input domain.ManualRankingCorrectionInput, expectedVersion int64) (domain.ManualRankingCorrectionChange, error)
+	ListManualRankingCorrections(ctx context.Context, playerID uint) ([]domain.ManualRankingCorrection, error)
+	RevokeManualRankingCorrection(ctx context.Context, playerID, correctionID uint, expectedVersion int64, administrator, reason string) (domain.ManualRankingCorrectionRevocation, error)
+}
+
+// ManualRankingCorrectionReplaceRepository makes the immutable replace
+// operation explicit for administrative clients and audit tooling.
+type ManualRankingCorrectionReplaceRepository interface {
+	ReplaceManualRankingCorrection(ctx context.Context, input domain.ManualRankingCorrectionInput, replaceCorrectionID uint, expectedVersion int64, expectedFingerprint string) (domain.ManualRankingCorrectionChange, error)
 }
 
 type Crawler interface {

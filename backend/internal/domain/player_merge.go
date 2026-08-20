@@ -14,15 +14,16 @@ type PlayerAlias struct {
 }
 
 type PlayerProfile struct {
-	ID                 uint
-	RequestedPlayerID  uint
-	CanonicalNameKey   string
-	DisplayName        string
-	Aliases            []PlayerAlias
-	MatchedAlias       string
-	Aggregate          PlayerAggregate
-	Active             bool
-	MergedIntoPlayerID *uint
+	ID                       uint
+	RequestedPlayerID        uint
+	CanonicalNameKey         string
+	DisplayName              string
+	Aliases                  []PlayerAlias
+	MatchedAlias             string
+	Aggregate                PlayerAggregate
+	Active                   bool
+	MergedIntoPlayerID       *uint
+	RankingCorrectionVersion int64
 }
 
 type MergeResult struct {
