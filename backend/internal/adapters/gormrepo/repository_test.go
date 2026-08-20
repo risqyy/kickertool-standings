@@ -529,6 +529,167 @@ func TestListPlayerRankingIsDeterministicallySorted(t *testing.T) {
 	}
 }
 
+func TestRankingTrendStatesUseLatestCompletedTournamentAndStableIdentity(t *testing.T) {
+	clock := &mutableRepositoryClock{now: time.Date(2026, time.January, 20, 12, 0, 0, 0, time.UTC)}
+	repo, _ := testRepoWithClock(t, clock)
+	ctx := context.Background()
+	firstDate := time.Date(2026, time.January, 5, 12, 0, 0, 0, time.UTC)
+	latestDate := time.Date(2026, time.January, 10, 23, 0, 0, 0, time.UTC)
+	if _, err := repo.UpsertMany(ctx, []domain.Tournament{
+		{Source: domain.KickertoolAPISource, SourceID: "trend-first", SourceKey: "trend-first", Name: "First", Date: &firstDate, Status: "finished", URL: "https://example.test/trend-first"},
+		{Source: domain.KickertoolAPISource, SourceID: "trend-latest", SourceKey: "trend-latest", Name: "Latest", Date: &latestDate, Status: "finished", URL: "https://example.test/trend-latest"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(tournamentID string, standings ...domain.TournamentStanding) {
+		t.Helper()
+		if _, err := repo.UpsertStandingSnapshot(ctx, domain.StandingSnapshot{Source: domain.KickertoolAPISource, TournamentID: tournamentID, Complete: true, Standings: standings}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("trend-first",
+		standing("trend-first", "trend-a-1", "trend-a", "A", 20),
+		standing("trend-first", "trend-b-1", "trend-b", "B", 10),
+		standing("trend-first", "trend-c-1", "trend-c", "C", 5),
+		standing("trend-first", "trend-d-1", "trend-d", "D", 1),
+	)
+	insert("trend-latest",
+		standing("trend-latest", "trend-a-2", "trend-a", "A", 1),
+		standing("trend-latest", "trend-b-2", "trend-b", "B", 30),
+		standing("trend-latest", "trend-c-2", "trend-c", "C", 4),
+		standing("trend-latest", "trend-d-2", "trend-d", "D", 0),
+		standing("trend-latest", "trend-e-2", "trend-e", "E", 0),
+	)
+	ranking, err := repo.ListPlayerRanking(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]domain.RankingTrend, len(ranking))
+	for _, row := range ranking {
+		got[row.PlayerName] = row.Trend
+	}
+	want := map[string]domain.RankingTrend{"B": domain.RankingTrendUp, "A": domain.RankingTrendDown, "C": domain.RankingTrendSame, "D": domain.RankingTrendSame, "E": domain.RankingTrendNew}
+	for name, trend := range want {
+		if got[name] != trend {
+			t.Fatalf("trend for %s=%q, want %q; ranking=%+v", name, got[name], trend, ranking)
+		}
+	}
+
+	// A same-day tie is resolved from source/key/ID, never by the database
+	// retrieval order. The larger stable key is the selected latest snapshot.
+	if !rankingTournamentBefore(TournamentModel{Source: "s", SourceKey: "a", ID: 2, Date: &latestDate}, TournamentModel{Source: "s", SourceKey: "z", ID: 1, Date: &latestDate}, time.FixedZone("test", 0)) {
+		t.Fatal("stable source key tie-break did not order the deterministic earlier candidate")
+	}
+}
+
+func TestYearRankingTrendDoesNotUsePriorCalendarYear(t *testing.T) {
+	clock := &mutableRepositoryClock{now: time.Date(2026, time.January, 20, 12, 0, 0, 0, time.UTC)}
+	repo, _ := testRepoWithClock(t, clock)
+	ctx := context.Background()
+	date2025 := time.Date(2025, time.December, 30, 12, 0, 0, 0, time.UTC)
+	date2026 := time.Date(2026, time.January, 3, 12, 0, 0, 0, time.UTC)
+	if _, err := repo.UpsertMany(ctx, []domain.Tournament{
+		{Source: domain.KickertoolAPISource, SourceID: "year-trend-2025", SourceKey: "year-trend-2025", Name: "2025", Date: &date2025, Status: "finished", URL: "https://example.test/year-trend-2025"},
+		{Source: domain.KickertoolAPISource, SourceID: "year-trend-2026", SourceKey: "year-trend-2026", Name: "2026", Date: &date2026, Status: "finished", URL: "https://example.test/year-trend-2026"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"year-trend-2025", "year-trend-2026"} {
+		if _, err := repo.UpsertStandingSnapshot(ctx, domain.StandingSnapshot{Source: domain.KickertoolAPISource, TournamentID: id, Complete: true, Standings: []domain.TournamentStanding{standing(id, id+"-row", "year-trend-player", "Year Trend Player", 10)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ranking, err := repo.ListPlayerRankingForYear(ctx, 2026)
+	if err != nil || len(ranking) != 1 {
+		t.Fatalf("2026 ranking=%+v err=%v", ranking, err)
+	}
+	if ranking[0].Trend != domain.RankingTrendNew {
+		t.Fatalf("2026 trend=%q, prior-year tournament must not be a baseline", ranking[0].Trend)
+	}
+}
+
+func TestRankingTrendBaselineKeepsEarlierSameBerlinDaySectionRegardlessSyncOrder(t *testing.T) {
+	clock := &mutableRepositoryClock{now: time.Date(2026, time.October, 20, 12, 0, 0, 0, time.UTC)}
+	repo, _ := testRepoWithClock(t, clock)
+	ctx := context.Background()
+	sectionDate := time.Date(2026, time.October, 9, 0, 0, 0, 0, time.UTC)
+	earlierStart := time.Date(2026, time.October, 9, 7, 0, 0, 0, time.UTC)
+	laterStart := time.Date(2026, time.October, 9, 13, 0, 0, 0, time.UTC)
+	// Deliberately persist the later section first. Chronology must use the
+	// persisted date/start fields, not insertion or crawl order.
+	if _, err := repo.UpsertMany(ctx, []domain.Tournament{
+		{Source: domain.KickertoolAPISource, SourceID: "section-later", SourceKey: "section-later", Name: "09.10 Later", Date: &sectionDate, StartTime: &laterStart, Status: "finished", URL: "https://example.test/section-later"},
+		{Source: domain.KickertoolAPISource, SourceID: "section-earlier", SourceKey: "section-earlier", Name: "09.10 Earlier", Date: &sectionDate, StartTime: &earlierStart, Status: "finished", URL: "https://example.test/section-earlier"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(tournamentID string, standings ...domain.TournamentStanding) {
+		t.Helper()
+		if _, err := repo.UpsertStandingSnapshot(ctx, domain.StandingSnapshot{Source: domain.KickertoolAPISource, TournamentID: tournamentID, Complete: true, Standings: standings}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("section-earlier",
+		standing("section-earlier", "section-earlier-a", "section-player-a", "A", 20),
+		standing("section-earlier", "section-earlier-b", "section-player-b", "B", 10),
+	)
+	insert("section-later",
+		standing("section-later", "section-later-a", "section-player-a", "A", 1),
+		standing("section-later", "section-later-b", "section-player-b", "B", 30),
+	)
+	ranking, err := repo.ListPlayerRanking(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trends := make(map[string]domain.RankingTrend, len(ranking))
+	for _, row := range ranking {
+		trends[row.PlayerName] = row.Trend
+	}
+	if trends["B"] != domain.RankingTrendUp || trends["A"] != domain.RankingTrendDown {
+		t.Fatalf("same-day baseline trends=%v ranking=%+v; earlier section was not retained", trends, ranking)
+	}
+}
+
+func TestRankingTrendCorrectionAtLatestBerlinDateIsCurrentOnly(t *testing.T) {
+	clock := &mutableRepositoryClock{now: time.Date(2026, time.January, 20, 12, 0, 0, 0, time.UTC)}
+	repo, db := testRepoWithClock(t, clock)
+	ctx := context.Background()
+	firstDate := time.Date(2026, time.January, 5, 12, 0, 0, 0, time.UTC)
+	latestDate := time.Date(2026, time.January, 10, 12, 0, 0, 0, time.UTC)
+	if _, err := repo.UpsertMany(ctx, []domain.Tournament{
+		{Source: domain.KickertoolAPISource, SourceID: "cutoff-first", SourceKey: "cutoff-first", Name: "First", Date: &firstDate, Status: "finished", URL: "https://example.test/cutoff-first"},
+		{Source: domain.KickertoolAPISource, SourceID: "cutoff-latest", SourceKey: "cutoff-latest", Name: "Latest", Date: &latestDate, Status: "finished", URL: "https://example.test/cutoff-latest"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"cutoff-first", "cutoff-latest"} {
+		if _, err := repo.UpsertStandingSnapshot(ctx, domain.StandingSnapshot{Source: domain.KickertoolAPISource, TournamentID: id, Complete: true, Standings: []domain.TournamentStanding{standing(id, id+"-row", "cutoff-player", "Cutoff Player", 10)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var player PlayerModel
+	if err := db.Where("canonical_name_key = ?", domain.PlayerKey("Cutoff Player")).First(&player).Error; err != nil {
+		t.Fatal(err)
+	}
+	// The repository normalizes direct callers to Berlin midnight, exactly the
+	// same boundary used by the public trend snapshot.
+	if _, err := repo.CreateManualRankingCorrection(ctx, domain.ManualRankingCorrectionInput{PlayerID: player.ID, EffectiveDate: latestDate, PointsCentsDelta: 500, Reason: "latest date correction", Administrator: "test"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	ranking, err := repo.ListPlayerRanking(ctx)
+	if err != nil || len(ranking) != 1 || ranking[0].TotalPointsCents == nil || *ranking[0].TotalPointsCents != 2500 {
+		t.Fatalf("current corrected ranking=%+v err=%v", ranking, err)
+	}
+	location, err := time.LoadLocation(domain.RankingLocation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := repo.listPlayerRankingBefore(ctx, berlinCalendarDay(&latestDate, location), nil)
+	if err != nil || len(baseline) != 1 || baseline[0].TotalPointsCents == nil || *baseline[0].TotalPointsCents != 1000 {
+		t.Fatalf("latest-date correction leaked into baseline=%+v err=%v", baseline, err)
+	}
+}
+
 func TestYearRankingUsesOnlyIncludedCompletedTournamentsAndScopesMetrics(t *testing.T) {
 	repo, db := testRepo(t)
 	ctx := context.Background()

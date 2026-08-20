@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { RankingPage } from './ranking-page'
@@ -20,6 +20,21 @@ describe('RankingPage', () => {
     expect(fetchMock.mock.calls[0][0]).not.toContain('/api/admin')
   })
 
+  it('keeps the public hierarchy on mobile and renders trend accessibly with display-only point rounding', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [
+      { rank: 1, trend: 'up', name: 'Trend Player', includedTournamentCount: 2, gamesPlayed: 4, totalPoints: '12.50', pointsPerGame: '3.13', goalDifference: 7 }
+    ], lastSyncAt: null, availableYears: [], selectedYear: null }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<RankingPage />)
+
+    expect((await screen.findAllByText('Trend Player')).length).toBeGreaterThan(0)
+    expect(screen.getAllByLabelText('Tendenz: Aufgestiegen')).toHaveLength(2)
+    expect(screen.queryByText('12.50')).not.toBeInTheDocument()
+    expect(screen.getAllByText('13').length).toBeGreaterThan(0)
+    const mobileCard = screen.getByRole('article')
+    expect(Array.from(mobileCard.querySelectorAll('dt')).map(node => node.textContent)).toEqual(['Platz', 'Tendenz', 'Name', 'Spiele', 'Turniere', 'Tordifferenz', 'Punkte', 'Punkte/Spiel'])
+  })
+
   it('keeps the period and search controls in one accessible, aligned filter group', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [], lastSyncAt: null, availableYears: [2025] }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     vi.stubGlobal('fetch', fetchMock)
@@ -33,6 +48,41 @@ describe('RankingPage', () => {
     expect(search).toHaveClass('h-11')
     await userEvent.type(search, 'Müller')
     expect(search).toHaveValue('Müller')
+  })
+
+  it('sorts exact decimal point strings without changing the trend value', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [
+      { rank: 1, trend: 'same', name: 'Lower', includedTournamentCount: 1, gamesPlayed: 1, totalPoints: '900719925474099.90', pointsPerGame: '1.00', goalDifference: 0 },
+      { rank: 2, trend: 'up', name: 'Higher', includedTournamentCount: 1, gamesPlayed: 1, totalPoints: '900719925474099.91', pointsPerGame: '1.00', goalDifference: 0 }
+    ], lastSyncAt: null, availableYears: [], selectedYear: null }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<RankingPage />)
+    await screen.findAllByText('Higher')
+    await userEvent.click(screen.getByRole('button', { name: 'Punkte' }))
+    await waitFor(() => expect(screen.getAllByRole('row')[1]).toHaveTextContent('Lower'))
+    expect(screen.getAllByLabelText('Tendenz: Gleich geblieben')).toHaveLength(2)
+    expect(screen.getAllByLabelText('Tendenz: Aufgestiegen')).toHaveLength(2)
+  })
+
+  it('keeps canonical rank and trend fixed while searching and client-sorting', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [
+      { rank: 1, trend: 'up', name: 'Player A', includedTournamentCount: 1, gamesPlayed: 1, totalPoints: '10.00', pointsPerGame: '10.00', goalDifference: 1 },
+      { rank: 2, trend: 'down', name: 'Player B', includedTournamentCount: 1, gamesPlayed: 1, totalPoints: '20.00', pointsPerGame: '20.00', goalDifference: 2 }
+    ], lastSyncAt: null, availableYears: [], selectedYear: null }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<RankingPage />)
+    await screen.findAllByText('Player A')
+    const headers = screen.getAllByRole('columnheader')
+    expect(headers[0]).toHaveAttribute('aria-sort', 'ascending')
+    expect(headers[0].querySelector('button')).not.toHaveAttribute('aria-sort')
+    expect(headers[1]).toHaveAttribute('aria-sort', 'none')
+
+    await userEvent.type(screen.getByRole('textbox', { name: 'Spieler suchen' }), 'B')
+    await userEvent.click(screen.getByRole('button', { name: 'Punkte' }))
+    const row = screen.getAllByRole('row')[1]
+    expect(row).toHaveTextContent('Player B')
+    expect(row).toHaveTextContent('2')
+    expect(within(row).getByLabelText('Tendenz: Abgestiegen')).toBeInTheDocument()
   })
 
   it('loads a selected year and keeps the active period visible', async () => {

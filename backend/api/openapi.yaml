@@ -259,7 +259,7 @@ components:
       type: object
       required: [items, lastSyncAt, availableYears, selectedYear]
       properties:
-        items: { type: array, items: { $ref: '#/components/schemas/RankingRow' } }
+        items: { type: array, items: { $ref: '#/components/schemas/PublicRankingRow' } }
         lastSyncAt: { type: string, format: date-time, nullable: true }
         availableYears:
           type: array
@@ -277,6 +277,13 @@ components:
         totalPoints: { type: string, pattern: '^-?\d+\.\d{2}$', nullable: true }
         pointsPerGame: { type: string, pattern: '^-?\d+\.\d{2}$', nullable: true }
         goalDifference: { type: integer, nullable: true }
+    PublicRankingRow:
+      allOf:
+        - $ref: '#/components/schemas/RankingRow'
+        - type: object
+          required: [trend]
+          properties:
+            trend: { type: string, enum: [up, down, same, new] }
     LegacyRankingRow:
       allOf:
         - $ref: '#/components/schemas/RankingRow'

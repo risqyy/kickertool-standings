@@ -70,7 +70,7 @@ func (h *PublicRankingAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	}
 	rows := make([]publicRankingRow, 0, len(aggregates))
 	for index, aggregate := range aggregates {
-		rows = append(rows, publicRankingRow{Rank: index + 1, Name: aggregate.PlayerName, IncludedTournamentCount: aggregate.TournamentCount, GamesPlayed: aggregate.GamesPlayed, TotalPoints: centsString(aggregate.TotalPointsCents), PointsPerGame: centsString(aggregate.PointsPerGameCents), GoalDifference: aggregate.GoalDifference})
+		rows = append(rows, publicRankingRow{Rank: index + 1, Trend: publicTrend(aggregate.Trend), Name: aggregate.PlayerName, IncludedTournamentCount: aggregate.TournamentCount, GamesPlayed: aggregate.GamesPlayed, TotalPoints: centsString(aggregate.TotalPointsCents), PointsPerGame: centsString(aggregate.PointsPerGameCents), GoalDifference: aggregate.GoalDifference})
 	}
 	var lastSync *time.Time
 	if source, ok := h.reader.(interface {
@@ -105,12 +105,22 @@ func requestedRankingYear(r *http.Request) (*int, error) {
 
 type publicRankingRow struct {
 	Rank                    int     `json:"rank"`
+	Trend                   string  `json:"trend"`
 	Name                    string  `json:"name"`
 	IncludedTournamentCount int     `json:"includedTournamentCount"`
 	GamesPlayed             *int    `json:"gamesPlayed"`
 	TotalPoints             *string `json:"totalPoints"`
 	PointsPerGame           *string `json:"pointsPerGame"`
 	GoalDifference          *int    `json:"goalDifference"`
+}
+
+func publicTrend(value domain.RankingTrend) string {
+	if value == "" {
+		// Keep adapters implementing the pre-trend reader interface usable while
+		// the concrete repository supplies all four states explicitly.
+		return string(domain.RankingTrendSame)
+	}
+	return string(value)
 }
 
 type rankingRow struct {

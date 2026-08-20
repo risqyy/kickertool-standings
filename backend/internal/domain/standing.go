@@ -74,5 +74,19 @@ type PlayerAggregate struct {
 	PointsAvailable    bool
 	GamesAvailable     bool
 	GoalsAvailable     bool
+	Trend              RankingTrend
 	RecalculatedAt     time.Time
 }
+
+// RankingTrend describes the change in canonical rank against the snapshot
+// immediately before the most recent qualifying tournament in the scope.
+// It is computed by the ranking read model and is intentionally not persisted
+// with source standings or materialized aggregates.
+type RankingTrend string
+
+const (
+	RankingTrendUp   RankingTrend = "up"
+	RankingTrendDown RankingTrend = "down"
+	RankingTrendSame RankingTrend = "same"
+	RankingTrendNew  RankingTrend = "new"
+)

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AlertCircle, ArrowDown, ArrowUp, ArrowUpDown, RefreshCw, Search } from 'lucide-react'
+import type { ReactNode } from 'react'
+import { AlertCircle, ArrowDown, ArrowUp, ArrowUpDown, Minus, RefreshCw, Search } from 'lucide-react'
 import { getRankings } from '@/api/client'
-import type { RankingRow } from '@/api/types'
+import type { RankingRow, RankingTrend } from '@/api/types'
 import { Alert } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -13,6 +14,44 @@ import { formatDate, formatDecimal } from '@/lib/utils'
 
 type SortKey = 'rank' | 'name' | 'tournaments' | 'games' | 'points' | 'ppg' | 'goals'
 type RankingPeriod = number | null
+type ColumnKey = SortKey | 'trend'
+type RankingColumn = { label: string; key: ColumnKey; align: string }
+
+const columns: RankingColumn[] = [
+  { label: 'Platz', key: 'rank', align: 'text-right' },
+  { label: 'Tendenz', key: 'trend', align: 'text-center' },
+  { label: 'Name', key: 'name', align: 'text-left' },
+  { label: 'Spiele', key: 'games', align: 'text-right' },
+  { label: 'Turniere', key: 'tournaments', align: 'text-right' },
+  { label: 'Tordifferenz', key: 'goals', align: 'text-right' },
+  { label: 'Punkte', key: 'points', align: 'text-right' },
+  { label: 'Punkte/Spiel', key: 'ppg', align: 'text-right' }
+]
+
+function compareNumericText(left: string | number, right: string | number) {
+  const parse = (value: string | number) => {
+    const text = String(value).trim()
+    const negative = text.startsWith('-')
+    const unsigned = negative || text.startsWith('+') ? text.slice(1) : text
+    const [whole = '0', fraction = ''] = unsigned.split('.')
+    return { negative, whole: whole.replace(/^0+(?=\d)/, ''), fraction }
+  }
+  const a = parse(left)
+  const b = parse(right)
+  if (a.negative !== b.negative) return a.negative ? -1 : 1
+  let magnitude = 0
+  if (a.whole.length !== b.whole.length) {
+    magnitude = a.whole.length < b.whole.length ? -1 : 1
+  } else if (a.whole !== b.whole) {
+    magnitude = a.whole < b.whole ? -1 : 1
+  } else {
+    const fractionLength = Math.max(a.fraction.length, b.fraction.length)
+    const leftFraction = a.fraction.padEnd(fractionLength, '0')
+    const rightFraction = b.fraction.padEnd(fractionLength, '0')
+    magnitude = leftFraction < rightFraction ? -1 : leftFraction > rightFraction ? 1 : 0
+  }
+  return a.negative ? -magnitude : magnitude
+}
 
 function compare(a: RankingRow, b: RankingRow, key: SortKey) {
   const values: Record<SortKey, [string | number | null, string | number | null]> = {
@@ -23,6 +62,7 @@ function compare(a: RankingRow, b: RankingRow, key: SortKey) {
   if (left === null || left === undefined || left === '') return right === null || right === undefined || right === '' ? 0 : 1
   if (right === null || right === undefined || right === '') return -1
   if (key === 'name') return String(left).localeCompare(String(right), 'de', { sensitivity: 'base' })
+  if (key === 'points' || key === 'ppg') return compareNumericText(left, right)
   return Number(left) - Number(right)
 }
 
@@ -30,8 +70,49 @@ function periodLabel(period: RankingPeriod) {
   return period === null ? 'Gesamtrangliste' : `Jahresrangliste ${period}`
 }
 
+function formatWholePoints(value: string | null | undefined) {
+  if (value === null || value === undefined || value === '') return '—'
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return '—'
+  return new Intl.NumberFormat('de-DE', { maximumFractionDigits: 0 }).format(parsed)
+}
+
+function trendLabel(value: RankingTrend | undefined) {
+  switch (value) {
+    case 'up': return 'Aufgestiegen'
+    case 'down': return 'Abgestiegen'
+    case 'new': return 'Neu'
+    default: return 'Gleich geblieben'
+  }
+}
+
+function TrendValue({ trend }: { trend: RankingTrend | undefined }) {
+  const label = trendLabel(trend)
+  const icon = trend === 'up'
+    ? <ArrowUp size={16} aria-hidden="true" />
+    : trend === 'down'
+      ? <ArrowDown size={16} aria-hidden="true" />
+      : trend === 'same' || trend === undefined
+        ? <Minus size={16} aria-hidden="true" />
+        : <span aria-hidden="true">Neu</span>
+  return <span className="inline-flex items-center justify-center gap-1" aria-label={`Tendenz: ${label}`}>{icon}<span className="sr-only">{label}</span></span>
+}
+
+function cellValue(row: RankingRow, key: ColumnKey): ReactNode {
+  switch (key) {
+    case 'rank': return row.rank
+    case 'trend': return <TrendValue trend={row.trend} />
+    case 'name': return row.name
+    case 'games': return row.gamesPlayed ?? '—'
+    case 'tournaments': return row.includedTournamentCount
+    case 'goals': return row.goalDifference ?? '—'
+    case 'points': return formatWholePoints(row.totalPoints)
+    case 'ppg': return formatDecimal(row.pointsPerGame)
+  }
+}
+
 function SortButton({ label, active, direction, onClick }: { label: string; active: boolean; direction: 'asc' | 'desc'; onClick: () => void }) {
-  return <button type="button" className="inline-flex min-h-11 items-center gap-1 rounded px-2 text-left font-medium hover:bg-muted" aria-sort={active ? (direction === 'asc' ? 'ascending' : 'descending') : 'none'} onClick={onClick}>{label}{active ? direction === 'asc' ? <ArrowUp size={14} aria-hidden="true" /> : <ArrowDown size={14} aria-hidden="true" /> : <ArrowUpDown size={14} aria-hidden="true" />}</button>
+  return <button type="button" className="inline-flex min-h-11 items-center gap-1 rounded px-2 text-left font-medium hover:bg-muted" onClick={onClick}>{label}{active ? direction === 'asc' ? <ArrowUp size={14} aria-hidden="true" /> : <ArrowDown size={14} aria-hidden="true" /> : <ArrowUpDown size={14} aria-hidden="true" />}</button>
 }
 
 export function RankingPage() {
@@ -73,7 +154,6 @@ export function RankingPage() {
     load(nextPeriod)
   }
   const activePeriodLabel = periodLabel(selectedPeriod)
-  const columns: Array<[string, SortKey, string]> = [['#', 'rank', 'text-right'], ['Spieler', 'name', 'text-left'], ['Turniere', 'tournaments', 'text-right'], ['Spiele', 'games', 'text-right'], ['Punkte', 'points', 'text-right'], ['Punkte/Spiel', 'ppg', 'text-right'], ['Tordifferenz', 'goals', 'text-right']]
 
   return <main className="page-shell">
     <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
@@ -118,8 +198,8 @@ export function RankingPage() {
         {status === 'error' && <Alert variant="destructive"><div className="flex items-start gap-3"><AlertCircle aria-hidden="true" /><div><p className="font-semibold">Rangliste konnte nicht geladen werden.</p><p className="mt-1">Zeitraum: {activePeriodLabel}</p><Button variant="outline" className="mt-3" onClick={() => load(selectedPeriod)}><RefreshCw aria-hidden="true" />Erneut versuchen</Button></div></div></Alert>}
         {status === 'ready' && filtered.length === 0 && <div className="py-12 text-center text-muted-foreground">Keine passenden Spieler gefunden.</div>}
         {status === 'ready' && filtered.length > 0 && <>
-          <div className="hidden md:block"><Table><TableHeader><TableRow>{columns.map(([label, key, align]) => <TableHead key={key} className={align}><SortButton label={label} active={sort.key === key} direction={sort.direction} onClick={() => changeSort(key)} /></TableHead>)}</TableRow></TableHeader><TableBody>{filtered.map(row => <TableRow key={row.name}><TableCell className="text-right tabular">{row.rank}</TableCell><TableCell className="font-medium">{row.name}</TableCell><TableCell className="text-right tabular">{row.includedTournamentCount}</TableCell><TableCell className="text-right tabular">{row.gamesPlayed ?? '—'}</TableCell><TableCell className="text-right tabular">{formatDecimal(row.totalPoints)}</TableCell><TableCell className="text-right tabular">{formatDecimal(row.pointsPerGame)}</TableCell><TableCell className="text-right tabular">{row.goalDifference ?? '—'}</TableCell></TableRow>)}</TableBody></Table></div>
-          <div className="grid gap-3 md:hidden">{filtered.map(row => <article key={row.name} className="rounded-md border p-4" aria-label={`${row.name}, ${activePeriodLabel}`}><div className="flex items-baseline justify-between gap-4"><span className="text-sm text-muted-foreground">#{row.rank}</span><h2 className="font-semibold">{row.name}</h2></div><dl className="mt-4 grid grid-cols-2 gap-3 text-sm"><div><dt className="text-muted-foreground">Turniere</dt><dd className="tabular">{row.includedTournamentCount}</dd></div><div><dt className="text-muted-foreground">Spiele</dt><dd className="tabular">{row.gamesPlayed ?? '—'}</dd></div><div><dt className="text-muted-foreground">Punkte</dt><dd className="tabular">{formatDecimal(row.totalPoints)}</dd></div><div><dt className="text-muted-foreground">Punkte/Spiel</dt><dd className="tabular">{formatDecimal(row.pointsPerGame)}</dd></div><div><dt className="text-muted-foreground">Tordifferenz</dt><dd className="tabular">{row.goalDifference ?? '—'}</dd></div></dl></article>)}</div>
+          <div className="hidden md:block"><Table><TableHeader><TableRow>{columns.map(column => <TableHead key={column.key} className={column.align} aria-sort={column.key === 'trend' ? 'none' : sort.key === column.key ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>{column.key === 'trend' ? <span className="inline-flex min-h-11 items-center px-2 font-medium">{column.label}</span> : <SortButton label={column.label} active={sort.key === column.key} direction={sort.direction} onClick={() => changeSort(column.key as SortKey)} />}</TableHead>)}</TableRow></TableHeader><TableBody>{filtered.map(row => <TableRow key={`${row.name}-${row.rank}`}>{columns.map(column => <TableCell key={column.key} className={`${column.align} ${column.key === 'name' ? 'font-medium' : 'tabular'}`}>{cellValue(row, column.key)}</TableCell>)}</TableRow>)}</TableBody></Table></div>
+          <div className="grid gap-3 md:hidden">{filtered.map(row => <article key={`${row.name}-${row.rank}`} className="rounded-md border p-4" aria-label={`${row.name}, ${activePeriodLabel}`}><dl className="grid grid-cols-2 gap-3 text-sm">{columns.map(column => <div key={column.key} className={column.key === 'name' ? 'col-span-2' : ''}><dt className="text-muted-foreground">{column.label}</dt><dd className={`${column.align} ${column.key === 'name' ? 'font-medium' : 'tabular'}`}>{cellValue(row, column.key)}</dd></div>)}</dl></article>)}</div>
         </>}
       </CardContent>
     </Card>
