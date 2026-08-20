@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -237,5 +238,111 @@ func (f fakePublicRankingReader) LastSyncAt(context.Context) (*time.Time, error)
 func TestAdminVersionErrorIsMappable(t *testing.T) {
 	if ports.ErrVersionConflict == nil {
 		t.Fatal("version conflict error must be exported")
+	}
+}
+
+type fakeManualCorrectionRepository struct {
+	preview        domain.ManualRankingCorrectionPreview
+	created        int
+	revokeExpected int64
+	revoked        int
+}
+
+func (f *fakeManualCorrectionRepository) PreviewManualRankingCorrection(context.Context, domain.ManualRankingCorrectionInput) (domain.ManualRankingCorrectionPreview, error) {
+	return f.preview, nil
+}
+func (f *fakeManualCorrectionRepository) CreateManualRankingCorrection(_ context.Context, input domain.ManualRankingCorrectionInput, expectedVersion int64) (domain.ManualRankingCorrectionChange, error) {
+	f.created++
+	return domain.ManualRankingCorrectionChange{Correction: domain.ManualRankingCorrection{ID: 1, PlayerID: input.PlayerID, EffectiveDate: input.EffectiveDate, EffectiveYear: input.EffectiveDate.Year(), Status: "active", Reason: input.Reason, Administrator: input.Administrator, Revision: 1, Version: 1}, Before: domain.PlayerAggregate{TournamentCount: 1}, After: domain.PlayerAggregate{TournamentCount: 2}, Version: expectedVersion + 1}, nil
+}
+func (f *fakeManualCorrectionRepository) ListManualRankingCorrections(context.Context, uint) ([]domain.ManualRankingCorrection, error) {
+	return []domain.ManualRankingCorrection{}, nil
+}
+func (f *fakeManualCorrectionRepository) RevokeManualRankingCorrection(_ context.Context, _ uint, _ uint, expected int64, _ string, _ string) (domain.ManualRankingCorrectionRevocation, error) {
+	if expected != f.revokeExpected {
+		return domain.ManualRankingCorrectionRevocation{}, ports.ErrVersionConflict
+	}
+	f.revoked++
+	return domain.ManualRankingCorrectionRevocation{Correction: domain.ManualRankingCorrection{ID: 1, Status: "revoked"}, Before: domain.PlayerAggregate{TournamentCount: 2}, After: domain.PlayerAggregate{TournamentCount: 1}, Version: expected + 1}, nil
+}
+
+func TestManualCorrectionPreviewAndConfirmUseExistingAdminBoundary(t *testing.T) {
+	logger := zerolog.Nop()
+	directory := fakePlayerDirectory{profiles: map[uint]domain.PlayerProfile{1: {ID: 1, DisplayName: "Player One", CanonicalNameKey: "player one"}}}
+	corrections := &fakeManualCorrectionRepository{preview: domain.ManualRankingCorrectionPreview{Player: directory.profiles[1], Correction: domain.ManualRankingCorrection{PlayerID: 1, EffectiveDate: time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC), EffectiveYear: 2026, Reason: "test", Status: "active"}, Before: domain.PlayerAggregate{TournamentCount: 1}, After: domain.PlayerAggregate{TournamentCount: 2}, ExpectedVersion: 0}}
+	admin := NewAdminAPIHandler(&fakeTournamentAdminRepository{}, directory, &fakePlayerMerger{}, &logger, corrections)
+	handler := AdminBasicAuth(admin, "example-admin", "example-password", &logger)
+	session := httptest.NewRequest(http.MethodGet, "/api/admin/session", nil)
+	session.SetBasicAuth("example-admin", "example-password")
+	sessionResponse := httptest.NewRecorder()
+	handler.ServeHTTP(sessionResponse, session)
+	cookie := sessionResponse.Result().Cookies()[0]
+	invalidDate := httptest.NewRequest(http.MethodPost, "/api/admin/players/1/corrections/preview", strings.NewReader(`{"effectiveDate":"2026-01-01T00:00:00Z","tournamentCountDelta":1,"reason":"test"}`))
+	invalidDate.SetBasicAuth("example-admin", "example-password")
+	invalidDate.Header.Set("Content-Type", "application/json")
+	invalidDate.Header.Set("X-CSRF-Token", cookie.Value)
+	invalidDate.AddCookie(cookie)
+	invalidDateResponse := httptest.NewRecorder()
+	handler.ServeHTTP(invalidDateResponse, invalidDate)
+	if invalidDateResponse.Code != http.StatusBadRequest {
+		t.Fatalf("non-date effectiveDate status=%d body=%s", invalidDateResponse.Code, invalidDateResponse.Body.String())
+	}
+	preview := httptest.NewRequest(http.MethodPost, "/api/admin/players/1/corrections/preview", strings.NewReader(`{"effectiveDate":"2026-01-01","tournamentCountDelta":1,"reason":"test"}`))
+	preview.SetBasicAuth("example-admin", "example-password")
+	preview.Header.Set("Content-Type", "application/json")
+	preview.Header.Set("X-CSRF-Token", cookie.Value)
+	preview.AddCookie(cookie)
+	previewResponse := httptest.NewRecorder()
+	handler.ServeHTTP(previewResponse, preview)
+	if previewResponse.Code != http.StatusOK || !strings.Contains(previewResponse.Body.String(), `"token"`) {
+		t.Fatalf("preview status=%d body=%s", previewResponse.Code, previewResponse.Body.String())
+	}
+	var payload struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(previewResponse.Body.Bytes(), &payload); err != nil || payload.Token == "" {
+		t.Fatalf("preview payload=%s err=%v", previewResponse.Body.String(), err)
+	}
+	confirm := httptest.NewRequest(http.MethodPost, "/api/admin/players/corrections/confirm", strings.NewReader(`{"token":"`+payload.Token+`","expectedVersion":0,"confirmed":true}`))
+	confirm.SetBasicAuth("example-admin", "example-password")
+	confirm.Header.Set("Content-Type", "application/json")
+	confirm.Header.Set("X-CSRF-Token", cookie.Value)
+	confirm.AddCookie(cookie)
+	confirmResponse := httptest.NewRecorder()
+	handler.ServeHTTP(confirmResponse, confirm)
+	if confirmResponse.Code != http.StatusOK || corrections.created != 1 {
+		t.Fatalf("confirm status=%d created=%d body=%s", confirmResponse.Code, corrections.created, confirmResponse.Body.String())
+	}
+}
+
+func TestManualCorrectionRevokeRequiresCSRFAndRejectsStaleVersion(t *testing.T) {
+	logger := zerolog.Nop()
+	directory := fakePlayerDirectory{profiles: map[uint]domain.PlayerProfile{1: {ID: 1, DisplayName: "Player One", CanonicalNameKey: "player one", RankingCorrectionVersion: 2}}}
+	corrections := &fakeManualCorrectionRepository{revokeExpected: 2}
+	admin := NewAdminAPIHandler(&fakeTournamentAdminRepository{}, directory, &fakePlayerMerger{}, &logger, corrections)
+	handler := AdminBasicAuth(admin, "example-admin", "example-password", &logger)
+	session := httptest.NewRequest(http.MethodGet, "/api/admin/session", nil)
+	session.SetBasicAuth("example-admin", "example-password")
+	sessionResponse := httptest.NewRecorder()
+	handler.ServeHTTP(sessionResponse, session)
+	cookie := sessionResponse.Result().Cookies()[0]
+	makeRequest := func(token, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/api/admin/players/1/corrections/1/revoke", strings.NewReader(body))
+		request.SetBasicAuth("example-admin", "example-password")
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-CSRF-Token", token)
+		request.AddCookie(cookie)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	if response := makeRequest("wrong", `{"expectedVersion":2,"reason":"wrong","confirmed":true}`); response.Code != http.StatusForbidden {
+		t.Fatalf("invalid csrf status=%d", response.Code)
+	}
+	if response := makeRequest(cookie.Value, `{"expectedVersion":1,"reason":"stale","confirmed":true}`); response.Code != http.StatusConflict {
+		t.Fatalf("stale revoke status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := makeRequest(cookie.Value, `{"expectedVersion":2,"reason":"valid revoke","confirmed":true}`); response.Code != http.StatusOK || corrections.revoked != 1 {
+		t.Fatalf("valid revoke status=%d revoked=%d body=%s", response.Code, corrections.revoked, response.Body.String())
 	}
 }

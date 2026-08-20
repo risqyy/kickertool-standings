@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ApiError, getAdminSession, getRankings, previewMerge } from './client'
+import { ApiError, confirmManualCorrection, getAdminSession, getRankings, previewManualCorrection, previewMerge, revokeManualCorrection } from './client'
 
 describe('public rankings API', () => {
   it('adds the selected year as a query parameter and keeps the overall URL unchanged', async () => {
@@ -52,5 +52,26 @@ describe('admin CSRF session flow', () => {
 
     await expect(previewMerge('token', 1, 2)).rejects.toMatchObject({ status: 403, message: 'invalid origin' } satisfies Partial<ApiError>)
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('manual ranking corrections API', () => {
+  it('keeps the exact effective date and exposes preview/confirm/revoke contracts', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: 'correction-token', player: {}, correction: {}, before: {}, after: {}, expectedVersion: 4 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ correction: {}, before: {}, after: {}, version: 5 }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ correction: {}, before: {}, after: {}, version: 6 }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const input = { effectiveDate: '2026-08-20', effectiveYear: 2026, tournamentCountDelta: 1, gamesPlayedDelta: -2, pointsCentsDelta: 125, goalDifferenceDelta: 3, reason: 'Protokollnachtrag', replaceCorrectionId: 9 }
+    await previewManualCorrection('csrf', 7, input)
+    await confirmManualCorrection('csrf', 'correction-token', 4)
+    await revokeManualCorrection('csrf', 7, 9, 5, 'Aufhebung dokumentiert')
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/admin/players/7/corrections/preview')
+    expect(JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)).toEqual(input)
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/admin/players/corrections/confirm')
+    expect(fetchMock.mock.calls[2][0]).toBe('/api/v1/admin/players/7/corrections/9/revoke')
+    expect(JSON.parse((fetchMock.mock.calls[2][1] as RequestInit).body as string).reason).toBe('Aufhebung dokumentiert')
   })
 })

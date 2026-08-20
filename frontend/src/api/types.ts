@@ -71,8 +71,70 @@ export interface Player {
   gamesPlayed: Nullable<number>
   totalPointsCents: Nullable<number>
   pointsPerGameCents: Nullable<number>
-  goalDifference: Nullable<number>
+	goalDifference: Nullable<number>
+	rankingCorrectionVersion?: number
 }
+
+export interface RankingAggregate {
+	tournamentCount: number
+	gamesPlayed: Nullable<number>
+	totalPointsCents: Nullable<number>
+	pointsPerGameCents: Nullable<number>
+	goalDifference: Nullable<number>
+}
+
+export interface ManualRankingCorrection {
+	id: number
+	playerId: number
+	playerKey: string
+	effectiveDate: string
+	effectiveYear: number
+	tournamentCountDelta: number
+	gamesPlayedDelta: number
+	pointsCentsDelta: number
+	goalDifferenceDelta: number
+	reason: string
+	administrator: string
+	createdAt: string
+	status: 'active' | 'revoked' | 'replaced' | string
+	revokedAt: Nullable<string>
+	revokedBy?: string
+	revocationReason?: string
+	revision: number
+	version: number
+	supersedesCorrectionId?: number | null
+	replacedByCorrectionId?: number | null
+}
+
+export interface ManualRankingCorrectionPreviewDetails {
+	player: Player
+	correction: ManualRankingCorrection
+	before: RankingAggregate
+	after: RankingAggregate
+	expectedVersion: number
+}
+
+export interface ManualRankingCorrectionPreview extends ManualRankingCorrectionPreviewDetails {
+  token: string
+  preview?: ManualRankingCorrectionPreviewDetails
+  result?: Pick<ManualRankingCorrectionChange, 'before' | 'after'>
+	superseded?: ManualRankingCorrection
+}
+
+export interface ManualRankingCorrectionChange {
+	correction: ManualRankingCorrection
+	before: RankingAggregate
+	after: RankingAggregate
+  version: number
+	superseded?: ManualRankingCorrection
+}
+
+export interface ManualRankingCorrectionListResponse {
+  items: ManualRankingCorrection[]
+  version: number
+}
+
+export interface ManualRankingCorrectionRevocationResponse extends ManualRankingCorrectionChange {}
 
 export interface MergeAggregate {
   tournamentCount: number

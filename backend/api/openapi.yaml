@@ -166,6 +166,88 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/admin/players/{id}/corrections:
+    get:
+      security: [{ basicAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      responses:
+        '200':
+          description: Immutable correction history and current optimistic version.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManualRankingCorrectionListResponse'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/admin/players/{id}/corrections/preview:
+    post:
+      security: [{ basicAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ManualRankingCorrectionInput' }
+      responses:
+        '200':
+          description: Dry-run correction preview.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ManualRankingCorrectionPreviewResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/admin/players/corrections/confirm:
+    post:
+      security: [{ basicAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, confirmed]
+              properties:
+                token: { type: string }
+                confirmed: { type: boolean, const: true }
+                expectedVersion: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: Idempotent correction result.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ManualRankingCorrectionChangeResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/admin/players/{id}/corrections/{correctionId}/revoke:
+    post:
+      security: [{ basicAuth: [] }]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+        - { name: correctionId, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion, reason, confirmed]
+              properties:
+                expectedVersion: { type: integer, format: int64 }
+                reason: { type: string, minLength: 3, maxLength: 500 }
+                confirmed: { type: boolean, const: true }
+      responses:
+        '200':
+          description: Correction revocation and recalculated aggregate.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ManualRankingCorrectionRevocationResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
 components:
   securitySchemes:
     basicAuth:
@@ -240,6 +322,104 @@ components:
         totalPointsCents: { type: integer, format: int64, nullable: true }
         pointsPerGameCents: { type: integer, format: int64, nullable: true }
         goalDifference: { type: integer, nullable: true }
+        rankingCorrectionVersion: { type: integer, format: int64 }
+    ManualRankingCorrectionInput:
+      type: object
+      required: [effectiveDate, reason]
+      properties:
+        effectiveDate: { type: string, pattern: '^\d{4}-\d{2}-\d{2}$' }
+        effectiveYear: { type: integer, format: int32 }
+        tournamentCountDelta: { type: integer }
+        gamesPlayedDelta: { type: integer }
+        pointsCentsDelta: { type: integer, format: int64 }
+        pointsDelta: { type: number, format: double }
+        goalDifferenceDelta: { type: integer }
+        reason: { type: string, minLength: 3, maxLength: 500 }
+        replaceCorrectionId: { type: integer, minimum: 1 }
+    ManualRankingCorrection:
+      type: object
+      required: [id, playerId, effectiveDate, effectiveYear, tournamentCountDelta, gamesPlayedDelta, pointsCentsDelta, goalDifferenceDelta, reason, administrator, createdAt, status, revision, version]
+      properties:
+        id: { type: integer }
+        playerId: { type: integer }
+        playerKey: { type: string }
+        effectiveDate: { type: string, format: date }
+        effectiveYear: { type: integer, format: int32 }
+        tournamentCountDelta: { type: integer }
+        gamesPlayedDelta: { type: integer }
+        pointsCentsDelta: { type: integer, format: int64 }
+        goalDifferenceDelta: { type: integer }
+        reason: { type: string }
+        administrator: { type: string }
+        createdAt: { type: string, format: date-time }
+        status: { type: string, enum: [active, revoked, replaced] }
+        revokedAt: { type: string, format: date-time, nullable: true }
+        revokedBy: { type: string }
+        revocationReason: { type: string }
+        revision: { type: integer, format: int64 }
+        version: { type: integer, format: int64 }
+        supersedesCorrectionId: { type: integer, nullable: true }
+        replacedByCorrectionId: { type: integer, nullable: true }
+    RankingAggregate:
+      type: object
+      required: [tournamentCount]
+      properties:
+        tournamentCount: { type: integer }
+        gamesPlayed: { type: integer, nullable: true }
+        totalPointsCents: { type: integer, format: int64, nullable: true }
+        pointsPerGameCents: { type: integer, format: int64, nullable: true }
+        goalDifference: { type: integer, nullable: true }
+    ManualRankingCorrectionListResponse:
+      type: object
+      required: [items, version]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/ManualRankingCorrection' } }
+        version: { type: integer, format: int64 }
+    ManualRankingCorrectionPreviewResponse:
+      type: object
+      required: [token, player, correction, before, after, expectedVersion]
+      properties:
+        token: { type: string }
+        player: { $ref: '#/components/schemas/Player' }
+        correction: { $ref: '#/components/schemas/ManualRankingCorrection' }
+        before: { $ref: '#/components/schemas/RankingAggregate' }
+        after: { $ref: '#/components/schemas/RankingAggregate' }
+        expectedVersion: { type: integer, format: int64 }
+        superseded: { $ref: '#/components/schemas/ManualRankingCorrection', nullable: true }
+        preview: { $ref: '#/components/schemas/ManualRankingCorrectionPreview' }
+        result:
+          type: object
+          required: [before, after]
+          properties:
+            before: { $ref: '#/components/schemas/RankingAggregate' }
+            after: { $ref: '#/components/schemas/RankingAggregate' }
+    ManualRankingCorrectionPreview:
+      type: object
+      required: [player, correction, before, after, expectedVersion]
+      properties:
+        player: { $ref: '#/components/schemas/Player' }
+        correction: { $ref: '#/components/schemas/ManualRankingCorrection' }
+        before: { $ref: '#/components/schemas/RankingAggregate' }
+        after: { $ref: '#/components/schemas/RankingAggregate' }
+        expectedVersion: { type: integer, format: int64 }
+        superseded: { $ref: '#/components/schemas/ManualRankingCorrection', nullable: true }
+    ManualRankingCorrectionChangeResponse:
+      type: object
+      required: [correction, before, after, version]
+      properties:
+        correction: { $ref: '#/components/schemas/ManualRankingCorrection' }
+        before: { $ref: '#/components/schemas/RankingAggregate' }
+        after: { $ref: '#/components/schemas/RankingAggregate' }
+        version: { type: integer, format: int64 }
+        superseded: { $ref: '#/components/schemas/ManualRankingCorrection', nullable: true }
+    ManualRankingCorrectionRevocationResponse:
+      type: object
+      required: [correction, before, after, version]
+      properties:
+        correction: { $ref: '#/components/schemas/ManualRankingCorrection' }
+        before: { $ref: '#/components/schemas/RankingAggregate' }
+        after: { $ref: '#/components/schemas/RankingAggregate' }
+        version: { type: integer, format: int64 }
   responses:
     Unauthorized:
       description: Missing or invalid Basic Auth.

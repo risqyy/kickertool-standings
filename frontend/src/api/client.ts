@@ -1,4 +1,4 @@
-import type { Dashboard, MergeResult, Player, RankingsResponse, TournamentPage } from './types'
+import type { Dashboard, ManualRankingCorrectionChange, ManualRankingCorrectionListResponse, ManualRankingCorrectionPreview, ManualRankingCorrectionRevocationResponse, MergeResult, Player, RankingsResponse, TournamentPage } from './types'
 
 export class ApiError extends Error {
   status: number
@@ -70,4 +70,28 @@ export async function previewMerge(csrf: string, sourcePlayerId: number, targetP
 }
 export async function confirmMerge(csrf: string, token: string, targetDisplayName: string) {
   return adminMutation<{ alreadyMerged: boolean; result: MergeResult }>('/api/v1/admin/players/merge/confirm', csrf, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, targetDisplayName, confirmed: true }) })
+}
+
+export interface ManualCorrectionInput {
+	effectiveDate: string
+	effectiveYear?: number
+	tournamentCountDelta: number
+	gamesPlayedDelta: number
+	pointsCentsDelta: number
+	goalDifferenceDelta: number
+	reason: string
+	replaceCorrectionId?: number
+}
+
+export async function listManualCorrections(playerId: number) {
+	return request<ManualRankingCorrectionListResponse>('/api/v1/admin/players/' + playerId + '/corrections')
+}
+export async function previewManualCorrection(csrf: string, playerId: number, input: ManualCorrectionInput) {
+	return adminMutation<ManualRankingCorrectionPreview>('/api/v1/admin/players/' + playerId + '/corrections/preview', csrf, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) })
+}
+export async function confirmManualCorrection(csrf: string, token: string, expectedVersion: number) {
+	return adminMutation<ManualRankingCorrectionChange>('/api/v1/admin/players/corrections/confirm', csrf, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, expectedVersion, confirmed: true }) })
+}
+export async function revokeManualCorrection(csrf: string, playerId: number, correctionId: number, expectedVersion: number, reason: string) {
+	return adminMutation<ManualRankingCorrectionRevocationResponse>('/api/v1/admin/players/' + playerId + '/corrections/' + correctionId + '/revoke', csrf, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedVersion, reason, confirmed: true }) })
 }
