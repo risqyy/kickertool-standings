@@ -42,13 +42,15 @@ func NewSource(startURL string, client ports.HTTPClient, logger *zerolog.Logger)
 func (s *Source) SourceName() string { return SourceName }
 
 func (s *Source) FetchTournaments(ctx context.Context) ([]domain.Tournament, error) {
-	current := s.startURL
+	pending := []string{s.startURL}
 	visited := make(map[string]struct{})
 	seenIDs := make(map[string]struct{})
 	var tournaments []domain.Tournament
-	for page := 0; page < 100 && current != ""; page++ {
+	for page := 0; page < 100 && len(pending) > 0; page++ {
+		current := pending[0]
+		pending = pending[1:]
 		if _, exists := visited[current]; exists {
-			break
+			continue
 		}
 		visited[current] = struct{}{}
 		body, finalURL, err := s.get(ctx, current)
@@ -60,10 +62,11 @@ func (s *Source) FetchTournaments(ctx context.Context) ([]domain.Tournament, err
 			return nil, fmt.Errorf("parse HTML listing %s: %w", current, err)
 		}
 		for _, tournament := range parsed {
-			if !strings.EqualFold(strings.TrimSpace(tournament.Status), "finished") {
-				continue
-			}
-			if normalizeEntryType(tournament.EntryType) != "monster_dyp" {
+			// The generic crawler invokes FetchStandings for every returned
+			// tournament. HTML has no separate capability probe, so keep pure
+			// Whist, unknown categories, and non-finished cards out of that sync
+			// queue. A later crawl will pick up a newly completed Monster DYP.
+			if !eligibleHTMLListingTournament(tournament) {
 				continue
 			}
 			identity := tournament.SourceID
@@ -76,11 +79,19 @@ func (s *Source) FetchTournaments(ctx context.Context) ([]domain.Tournament, err
 			seenIDs[identity] = struct{}{}
 			tournaments = append(tournaments, tournament)
 		}
-		current = ""
 		for _, next := range nextURLs {
-			if _, exists := visited[next]; !exists {
-				current = next
-				break
+			if _, visitedAlready := visited[next]; visitedAlready {
+				continue
+			}
+			queued := false
+			for _, candidate := range pending {
+				if candidate == next {
+					queued = true
+					break
+				}
+			}
+			if !queued {
+				pending = append(pending, next)
 			}
 		}
 	}
@@ -91,6 +102,10 @@ func (s *Source) FetchTournaments(ctx context.Context) ([]domain.Tournament, err
 		s.logger.Info().Str("source", SourceName).Int("pages", len(visited)).Int("found", len(tournaments)).Msg("HTML listing fetched")
 	}
 	return tournaments, nil
+}
+
+func eligibleHTMLListingTournament(tournament domain.Tournament) bool {
+	return strings.EqualFold(strings.TrimSpace(tournament.Status), "finished") && normalizeEntryType(tournament.EntryType) == "monster_dyp"
 }
 
 func (s *Source) FetchStandings(ctx context.Context, tournament domain.Tournament) (domain.StandingSnapshot, error) {
@@ -157,7 +172,7 @@ func (s *Source) FetchStandings(ctx context.Context, tournament domain.Tournamen
 	for _, row := range rowsByKey {
 		rows = append(rows, row)
 	}
-	if len(rows) == 0 || !strings.EqualFold(strings.TrimSpace(tournament.Status), "finished") || meta.EntryType != "monster_dyp" || !meta.EntryTypeEvidence {
+	if len(rows) == 0 || !strings.EqualFold(strings.TrimSpace(tournament.Status), "finished") || !eligibleHTMLTournament(tournament, meta) {
 		s.logStandingsDiagnostics(tournament, visited, tablesFound, len(rows), 0, "no complete finished Monster DYP standings discovered", meta, started)
 		return domain.StandingSnapshot{Source: SourceName, TournamentID: tournament.SourceID, URL: finalURL, Complete: false, FetchedAt: time.Now()}, nil
 	}
@@ -294,7 +309,7 @@ func parseListing(pageURL string, body []byte, inScope func(*url.URL) bool) ([]d
 				}
 			}
 		}
-		for _, key := range []string{"data-next-url", "data-url", "data-href"} {
+		for _, key := range []string{"data-next-url", "data-next-page", "data-page-url", "data-load-more-url", "data-url", "data-href"} {
 			if resolved := resolveURL(page, attr(node, key), inScope); resolved != "" && !isTournamentURL(resolved) {
 				nextURLs = append(nextURLs, resolved)
 			}
@@ -319,11 +334,24 @@ func discoverURLs(page *url.URL, body []byte, inScope func(*url.URL) bool) []str
 			continue
 		}
 		parsed, err := url.Parse(resolved)
-		if err == nil && parsed.Query().Get("page") != "" {
+		if err == nil && hasPaginationQuery(parsed) {
 			result = append(result, resolved)
 		}
 	}
 	return result
+}
+
+func hasPaginationQuery(parsed *url.URL) bool {
+	if parsed == nil {
+		return false
+	}
+	query := parsed.Query()
+	for _, key := range []string{"page", "offset", "cursor", "p"} {
+		if query.Get(key) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func isTournamentURL(raw string) bool {
@@ -348,23 +376,51 @@ func isNextLink(node *html.Node, resolved string) bool {
 		return true
 	}
 	parsed, err := url.Parse(resolved)
-	return err == nil && parsed.Query().Get("page") != ""
+	return err == nil && hasPaginationQuery(parsed)
 }
 
 func tournamentFromAnchor(anchor *html.Node, resolved string) domain.Tournament {
 	parsed, _ := url.Parse(resolved)
 	id := tournamentID(parsed)
 	text := nodeText(anchor)
-	date := parseHTMLDate(text)
-	status := statusFromText(text+" "+attr(anchor, "class"), date)
-	participants := parseParticipants(text)
+	date, startTime := parseHTMLDateComponent(anchor)
+	if date == nil {
+		if component := tournamentComponentScope(anchor); component != nil {
+			date, startTime = parseHTMLDateComponent(component)
+		}
+	}
+	componentText := text
+	if component := tournamentComponentScope(anchor); component != nil {
+		componentText += " " + nodeText(component)
+	}
+	status := statusFromText(componentText+" "+attr(anchor, "class"), date)
+	participants := parseParticipants(componentText)
 	key := ""
 	if id == "" {
 		hash := sha256.Sum256([]byte(strings.TrimRight(resolved, "/")))
 		key = "sha256:" + hex.EncodeToString(hash[:])
 	}
-	entryType := normalizeEntryType(nodeText(anchor))
-	return domain.Tournament{Source: SourceName, SourceID: id, SourceKey: key, Name: anchorTitle(anchor, id), Date: date, Status: status, EntryType: entryType, IsLive: strings.Contains(status, "running"), Participants: participants, URL: resolved}
+	typeText := tournamentTypeText(anchor)
+	if normalizeEntryType(typeText) == "" {
+		if component := tournamentComponentScope(anchor); component != nil {
+			typeText = tournamentTypeText(component)
+		}
+	}
+	entryType := normalizeEntryType(typeText)
+	return domain.Tournament{Source: SourceName, SourceID: id, SourceKey: key, Name: anchorTitle(anchor, id), Date: date, StartTime: startTime, Status: status, EntryType: entryType, IsLive: strings.Contains(status, "running"), Participants: participants, URL: resolved}
+}
+
+func tournamentComponentScope(anchor *html.Node) *html.Node {
+	for parent := anchor.Parent; parent != nil; parent = parent.Parent {
+		if parent.Type != html.ElementNode {
+			continue
+		}
+		classAndID := strings.ToLower(attr(parent, "class") + " " + attr(parent, "id"))
+		if parent.Data == "li" || strings.Contains(classAndID, "card") || strings.Contains(classAndID, "tournament") || strings.Contains(classAndID, "event") || strings.Contains(classAndID, "list-item") {
+			return parent
+		}
+	}
+	return nil
 }
 
 func tournamentID(parsed *url.URL) string {
@@ -388,7 +444,7 @@ func anchorTitle(anchor *html.Node, fallback string) string {
 			return
 		}
 		class := strings.ToLower(attr(node, "class"))
-		if node.Data == "h1" || node.Data == "h2" || node.Data == "h3" || strings.Contains(class, "title") || strings.Contains(class, "tournament-name") {
+		if node.Data == "h1" || node.Data == "h2" || node.Data == "h3" || strings.Contains(class, "title") || strings.Contains(class, "tournament-name") || classHasToken(class, "name") {
 			title = strings.TrimSpace(nodeText(node))
 		}
 	})
@@ -399,6 +455,41 @@ func anchorTitle(anchor *html.Node, fallback string) string {
 		return fallback
 	}
 	return title
+}
+
+func classHasToken(class, wanted string) bool {
+	for _, token := range strings.Fields(strings.ToLower(class)) {
+		if token == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+// tournamentTypeText returns text from explicit category/type components first.
+// The listing contains unrelated metadata (date, participant count, status) in
+// the same card, so using the complete anchor text would make a date or status
+// look like a tournament type.
+func tournamentTypeText(anchor *html.Node) string {
+	var values []string
+	walk(anchor, func(node *html.Node) {
+		if node.Type != html.ElementNode {
+			return
+		}
+		classAndID := strings.ToLower(attr(node, "class") + " " + attr(node, "id"))
+		for _, key := range []string{"data-name-type", "data-nametype", "data-category", "data-entry-type", "data-entrytype", "name-type", "nametype", "name_type", "category", "entry-type", "entry_type"} {
+			if value := strings.TrimSpace(attr(node, key)); value != "" {
+				values = append(values, value)
+				return
+			}
+		}
+		if strings.Contains(classAndID, "name-type") || strings.Contains(classAndID, "nametype") || strings.Contains(classAndID, "category") || strings.Contains(classAndID, "entry-type") || strings.Contains(classAndID, "discipline-type") {
+			if value := strings.TrimSpace(nodeText(node)); value != "" {
+				values = append(values, value)
+			}
+		}
+	})
+	return strings.Join(values, " ")
 }
 
 func parseParticipants(text string) *int {
@@ -413,23 +504,132 @@ func parseParticipants(text string) *int {
 	return &value
 }
 
+// parseHTMLDateComponent reads a semantic <time> (or an equivalent data
+// attribute) before falling back to visible text. A timestamp is interpreted
+// as an instant, converted to Europe/Berlin, and its local calendar day is
+// stored as Date. This is important around midnight: e.g.
+// 2025-05-03T22:17:32Z is 04.05.2025 in Berlin.
+func parseHTMLDateComponent(root *html.Node) (*time.Time, *time.Time) {
+	if root == nil {
+		return nil, nil
+	}
+	var date *time.Time
+	var start *time.Time
+	walk(root, func(node *html.Node) {
+		if node.Type != html.ElementNode || date != nil && start != nil {
+			return
+		}
+		for _, key := range []string{"datetime", "data-datetime", "data-date", "data-tournament-date", "data-event-date", "data-start", "data-start-date", "data-tournament-start", "data-timestamp", "start-date", "startDate"} {
+			if raw := strings.TrimSpace(attr(node, key)); raw != "" {
+				if value, hasClock := parseHTMLDateValue(raw); value != nil {
+					if date == nil {
+						date = value
+					}
+					if hasClock && start == nil {
+						if instant, ok := parseHTMLTimeInstant(raw); ok {
+							start = instant
+						} else {
+							start = value
+						}
+					}
+					break
+				}
+			}
+		}
+	})
+	if date != nil {
+		return date, start
+	}
+	walk(root, func(node *html.Node) {
+		if node.Type != html.ElementNode || date != nil {
+			return
+		}
+		classAndID := strings.ToLower(attr(node, "class") + " " + attr(node, "id"))
+		if !strings.Contains(classAndID, "date") && !strings.Contains(classAndID, "time") && !strings.Contains(classAndID, "start") {
+			return
+		}
+		if value, hasClock := parseHTMLDateValue(nodeText(node)); value != nil {
+			date = value
+			if hasClock {
+				if instant, ok := parseHTMLTimeInstant(nodeText(node)); ok {
+					start = instant
+				} else {
+					start = value
+				}
+			}
+		}
+	})
+	return date, start
+}
+
 func parseHTMLDate(text string) *time.Time {
-	patterns := []string{"02.01.2006", "2.1.2006", "02/01/2006", "2006-01-02"}
-	for _, pattern := range patterns {
-		match := regexp.MustCompile(`\d{1,4}[./-]\d{1,2}[./-]\d{1,4}`).FindString(text)
-		if match == "" {
-			continue
-		}
-		location, locationErr := time.LoadLocation("Europe/Berlin")
-		if locationErr != nil {
-			location = time.UTC
-		}
-		value, err := time.ParseInLocation(pattern, match, location)
-		if err == nil {
-			return &value
+	value, _ := parseHTMLDateValue(text)
+	if value != nil {
+		return value
+	}
+	match := regexp.MustCompile(`\b\d{1,4}[./-]\d{1,2}[./-]\d{1,4}\b`).FindString(text)
+	if match == "" {
+		return nil
+	}
+	value, _ = parseHTMLDateValue(match)
+	return value
+}
+
+func parseHTMLDateValue(raw string) (*time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, false
+	}
+	location, locationErr := time.LoadLocation("Europe/Berlin")
+	if locationErr != nil {
+		location = time.UTC
+	}
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999Z07:00"} {
+		if value, err := time.Parse(layout, raw); err == nil {
+			local := value.In(location)
+			day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, location)
+			return &day, true
 		}
 	}
-	return nil
+	for _, layout := range []string{"2006-01-02T15:04:05.999999999", "2006-01-02T15:04:05", "2006-01-02 15:04:05", "2006-01-02 15:04", "2006-01-02", "02.01.2006", "2.1.2006", "02/01/2006", "2/1/2006"} {
+		if value, err := time.ParseInLocation(layout, raw, location); err == nil {
+			if !strings.Contains(layout, "15:") {
+				value = time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, location)
+				return &value, false
+			}
+			return localDateValue(value), true
+		}
+	}
+	return nil, false
+}
+
+func localDateValue(value time.Time) *time.Time {
+	local := value.In(value.Location())
+	day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, local.Location())
+	return &day
+}
+
+func parseHTMLTimeInstant(raw string) (*time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, false
+	}
+	location, locationErr := time.LoadLocation("Europe/Berlin")
+	if locationErr != nil {
+		location = time.UTC
+	}
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999Z07:00"} {
+		if value, err := time.Parse(layout, raw); err == nil {
+			value = value.In(location)
+			return &value, true
+		}
+	}
+	for _, layout := range []string{"2006-01-02T15:04:05.999999999", "2006-01-02T15:04:05", "2006-01-02 15:04:05", "2006-01-02 15:04"} {
+		if value, err := time.ParseInLocation(layout, raw, location); err == nil {
+			return &value, true
+		}
+	}
+	return nil, false
 }
 
 func statusFromText(text string, date *time.Time) string {
@@ -463,6 +663,20 @@ type standingsMeta struct {
 	GroupName         string
 	EntryType         string
 	EntryTypeEvidence bool
+	Modes             []string
+	ModeEvidence      bool
+}
+
+// eligibleHTMLTournament deliberately uses the tournament category (the
+// nameType/entryType evidence), not a mode list. A Monster-DYP category may
+// expose a Whist mode alongside it and remains eligible; a Whist category is
+// never eligible by itself.
+func eligibleHTMLTournament(tournament domain.Tournament, meta standingsMeta) bool {
+	category := normalizeEntryType(meta.EntryType)
+	if category == "" {
+		category = normalizeEntryType(tournament.EntryType)
+	}
+	return meta.EntryTypeEvidence && category == "monster_dyp"
 }
 
 func parseStandings(pageURL string, body []byte) ([]domain.TournamentStanding, standingsMeta, error) {
@@ -470,8 +684,8 @@ func parseStandings(pageURL string, body []byte) ([]domain.TournamentStanding, s
 	if err != nil {
 		return nil, standingsMeta{}, err
 	}
-	entryType, evidence := entryTypeEvidence(root, body)
-	meta := standingsMeta{DisciplineName: "HTML standings", GroupName: "HTML standings", EntryType: entryType, EntryTypeEvidence: evidence}
+	entryType, evidence, modes := competitionEvidence(root, body)
+	meta := standingsMeta{DisciplineName: "HTML standings", GroupName: "HTML standings", EntryType: entryType, EntryTypeEvidence: evidence, Modes: modes, ModeEvidence: len(modes) > 0}
 	var result []domain.TournamentStanding
 	walk(root, func(node *html.Node) {
 		if node.Type != html.ElementNode || node.Data != "table" || strings.Contains(strings.ToLower(attr(node, "class")), "nested") {
