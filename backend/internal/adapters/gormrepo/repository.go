@@ -452,7 +452,11 @@ func (r *Repository) ListPlayerRanking(ctx context.Context) ([]domain.PlayerAggr
 	// Read the current source rows and active corrections together. The
 	// materialized aggregate remains a cache, while this reader makes a future
 	// effective date visible without waiting for another crawl/recalculation.
-	return r.listCurrentRanking(ctx, r.clock.Now())
+	ranking, err := r.listCurrentRanking(ctx, r.clock.Now())
+	if err != nil {
+		return nil, err
+	}
+	return r.withRankingTrends(ctx, ranking, nil)
 }
 
 // ListAvailableRankingYears returns calendar years that have at least one
@@ -502,7 +506,11 @@ func (r *Repository) ListPlayerRankingForYear(ctx context.Context, year int) ([]
 	if err != nil {
 		return nil, err
 	}
-	return r.aggregateRankingRows(ctx, rows, corrections)
+	ranking, err := r.aggregateRankingRows(ctx, rows, corrections)
+	if err != nil {
+		return nil, err
+	}
+	return r.withRankingTrends(ctx, ranking, &year)
 }
 
 // qualifiedRankingTournaments centralizes the inclusion/completion/standing

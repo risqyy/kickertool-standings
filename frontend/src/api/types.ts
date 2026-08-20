@@ -1,7 +1,10 @@
 export type Nullable<T> = T | null
 
+export type RankingTrend = 'up' | 'down' | 'same' | 'new'
+
 export interface RankingRow {
   rank: number
+  trend: RankingTrend
   name: string
   includedTournamentCount: number
   gamesPlayed: Nullable<number>

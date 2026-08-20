@@ -464,7 +464,15 @@ func (r *Repository) recalculatePlayerAggregates(tx *gorm.DB, player PlayerModel
 // semantics as the current/year readers and is intentionally a repository
 // method so audit comparisons cannot accidentally mutate source standings.
 func (r *Repository) ListPlayerRankingBefore(ctx context.Context, cutoff time.Time) ([]domain.PlayerAggregate, error) {
-	tournaments, err := r.qualifiedRankingTournaments(ctx, nil)
+	return r.listPlayerRankingBefore(ctx, cutoff, nil)
+}
+
+// listPlayerRankingBefore is also used by the public trend read model. The
+// optional year keeps an annual baseline inside the selected calendar year;
+// without it, a December annual ranking could accidentally compare against
+// cumulative history from earlier years.
+func (r *Repository) listPlayerRankingBefore(ctx context.Context, cutoff time.Time, year *int) ([]domain.PlayerAggregate, error) {
+	tournaments, err := r.qualifiedRankingTournaments(ctx, year)
 	if err != nil {
 		return nil, err
 	}
@@ -480,7 +488,7 @@ func (r *Repository) ListPlayerRankingBefore(ctx context.Context, cutoff time.Ti
 			return nil, fmt.Errorf("list snapshot standings: %w", err)
 		}
 	}
-	corrections, err := r.activeCorrections(ctx, r.clock.Now(), nil, &cutoff)
+	corrections, err := r.activeCorrections(ctx, r.clock.Now(), year, &cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("list snapshot corrections: %w", err)
 	}
