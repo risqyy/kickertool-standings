@@ -143,12 +143,14 @@ func competitionEvidence(root *html.Node, body []byte) (string, bool, []string) 
 		}
 		if strings.Contains(classAndID, "mode") {
 			modes = append(modes, normalizeModes(nodeText(node))...)
+			modes = append(modes, normalizeModes(classAndID)...)
 		}
 	})
 	text := string(body)
 	for _, pattern := range []string{
 		`(?i)(?:name[_-]?type|category|entry[_-]?type|discipline[_-]?type|format)\s*[=:]\s*["']?([a-z][a-z _+/-]+)`,
 		`(?i)"(?:nameType|name_type|category|entryType|entry_type|disciplineType|discipline_type)"\s*:\s*"([^"]+)"`,
+		`(?i)(?:["']?(?:nameType|name_type|category|entryType|entry_type|disciplineType|discipline_type|format)["']?)\s*:\s*["']?([a-z][a-z0-9 _+/-]*?)["']?\s*[,}]`,
 	} {
 		match := regexp.MustCompile(pattern).FindStringSubmatch(text)
 		if len(match) == 2 {
@@ -160,7 +162,7 @@ func competitionEvidence(root *html.Node, body []byte) (string, bool, []string) 
 		}
 	}
 	for _, pattern := range []string{
-		`(?i)"(?:modes|mode|tournamentMode|tournament_mode)"\s*:\s*(?:\[([^\]]*)\]|"([^"]+)"|([^,}\s]+))`,
+		`(?i)(?:["']?(?:modes|mode|tournamentMode|tournament_mode)["']?)\s*:\s*(?:\[([^\]]*)\]|"([^"]+)"|([^,}\s]+))`,
 		`(?i)(?:data-modes|data-mode|modes|mode|tournament-mode|tournament_mode)\s*=\s*["']([^"']+)`,
 	} {
 		for _, match := range regexp.MustCompile(pattern).FindAllStringSubmatch(text, -1) {
@@ -408,7 +410,10 @@ func mergeStandingsMeta(left, right standingsMeta) standingsMeta {
 	if left.GroupName == "" {
 		left.GroupName = right.GroupName
 	}
-	if right.EntryTypeEvidence {
+	// Listing nameType is the authoritative competition category. Detail and
+	// endpoint pages often expose mode evidence (for example Whist alongside a
+	// Monster-DYP category); later evidence must not overwrite that category.
+	if !left.EntryTypeEvidence && right.EntryTypeEvidence {
 		left.EntryType = right.EntryType
 		left.EntryTypeEvidence = true
 	} else if left.EntryType == "" {
