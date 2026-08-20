@@ -315,12 +315,25 @@ func TestSourceDiscoversSeparateStandingsAndDynamicJSONEndpoint(t *testing.T) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		switch r.URL.Path {
 		case "/community/tournaments/t3":
-			_, _ = w.Write([]byte(`<h1>Example Cup</h1><section class="discipline"><span class="entry-type">Monster DYP</span><a href="/community/tournaments/t3/groups/g1/standings">Group standings</a><a href="/community/tournaments/t3/groups/missing/standings">Missing optional group</a><a href="/community/tournaments/foreign/groups/g1/standings">Foreign group</a><a href="/community/tournaments/foreign/groups/t3/standings">Foreign group ID collision</a></section><script>fetch("/community/xhr/t3/group/g1/standings.json");fetch("/community/xhr/foreign/group/g1/standings.json");fetch("/community/xhr/foreign/group/t3/standings.json");fetch("/community/tournaments/foreign/standings?group=t3")</script>`))
+			_, _ = w.Write([]byte(`<h1>Example Cup</h1><section class="discipline"><span class="entry-type">Monster DYP</span><a href="/community/tournaments/t3/groups/g1/standings">Group standings</a><a href="/community/tournaments/t3/groups/missing/standings">Missing optional group</a><a href="/community/tournaments/foreign/groups/g1/standings">Foreign group</a><a href="/community/tournaments/foreign/groups/t3/standings">Foreign group ID collision</a><a href="/community/tournaments/foreign/standings?tournamentId=t3">Foreign query ID collision</a></section><script>fetch("/community/xhr/t3/group/g1/standings.json");fetch("/community/xhr/foreign/group/g1/standings.json");fetch("/community/xhr/foreign/group/t3/standings.json");fetch("/community/xhr/foreign/standings?tournamentId=t3");fetch("/community/tournaments/foreign/standings?group=t3")</script>`))
 		case "/community/tournaments/t3/groups/g1/standings":
 			_, _ = w.Write([]byte(`<div data-entry-type="monster_dyp"></div><table><tr><th>Rank</th><th>Player</th><th>Points</th><th>Matches</th></tr><tr data-standing-id="r1" data-entry-id="e1" data-player-id="p1"><td>1</td><td>Player One</td><td>2,00</td><td>4</td></tr></table>`))
 		case "/community/xhr/t3/group/g1/standings.json":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"entryType":"monster_dyp","standings":[{"id":"r2","rank":2,"entry":{"id":"e2","name":"Example Team B"},"player":{"id":"p2","name":"Player Two"},"points":1.5,"matches":3},{"id":"r3","rank":1,"entry":{"id":"e3","name":"Example Team A"},"player":{"id":"p1","name":"Player One"},"points":2.0,"matches":4}]}`))
+		case "/community/tournaments/foreign/standings":
+			if r.URL.Query().Get("tournamentId") == "t3" {
+				_, _ = w.Write([]byte(`<table><tr><th>#</th><th>Player</th></tr><tr data-standing-id="foreign-r1" data-player-id="foreign-p1"><td>1</td><td>Foreign Player</td></tr></table>`))
+				break
+			}
+			http.NotFound(w, r)
+		case "/community/xhr/foreign/standings":
+			if r.URL.Query().Get("tournamentId") == "t3" {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"entryType":"monster_dyp","standings":[{"id":"foreign-r2","rank":1,"player":{"id":"foreign-p2","name":"Foreign Query Player"},"points":9,"matches":9}]}`))
+				break
+			}
+			http.NotFound(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -368,6 +381,34 @@ func TestSourceDiscoversSeparateStandingsAndDynamicJSONEndpoint(t *testing.T) {
 	}
 }
 
+func TestCandidateBelongsToTournamentUsesFirstRouteContext(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+
+	source, err := NewSource(server.URL+"/community", server.Client(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tournament := domain.Tournament{SourceID: "t3"}
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{name: "nested foreign route wins", url: server.URL + "/community/tournaments/foreign/xhr/t3/standings", want: false},
+		{name: "foreign xhr route wins", url: server.URL + "/community/xhr/foreign/t3/standings", want: false},
+		{name: "query-only standings fallback", url: server.URL + "/community/standings?tournamentId=t3", want: true},
+		{name: "generic query value is not an ID", url: server.URL + "/community/standings?group=t3", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := source.candidateBelongsToTournament(test.url, tournament); got != test.want {
+				t.Fatalf("candidateBelongsToTournament(%q)=%v, want %v", test.url, got, test.want)
+			}
+		})
+	}
+}
+
 func TestSourceImportsOnlyTournamentsWithReachableStandingsPage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -379,7 +420,7 @@ func TestSourceImportsOnlyTournamentsWithReachableStandingsPage(t *testing.T) {
 		case "/fvhkickern/tournaments/with/standings":
 			_, _ = w.Write([]byte(`<h1>With Standings</h1><div data-name-type="Whist"></div><table><tr><th>#</th><th>Player</th></tr><tr data-standing-id="r1" data-player-id="p1"><td>1</td><td>Player One</td></tr></table>`))
 		case "/fvhkickern/tournaments/without":
-			_, _ = w.Write([]byte(`<h1>Without Standings</h1><table><tr><th>#</th><th>Player</th></tr><tr><td>1</td><td>Not a standings page</td></tr></table>`))
+			_, _ = w.Write([]byte(`<h1>Without Standings</h1><a href="/fvhkickern/tournaments/foreign/standings?tournamentId=without">Foreign query ID collision</a><table><tr><th>#</th><th>Player</th></tr><tr><td>1</td><td>Not a standings page</td></tr></table>`))
 		case "/fvhkickern/tournaments/whist":
 			_, _ = w.Write([]byte(`<h1>Whist Standings</h1><nav><a href="/fvhkickern/tournaments/whist/standings">Standings</a></nav>`))
 		case "/fvhkickern/tournaments/whist/standings":
@@ -452,6 +493,54 @@ func TestSourceImportsOnlyTournamentsWithReachableStandingsPage(t *testing.T) {
 	}
 	if whist, ok := seen["whist"]; !ok || whist.EntryType != "whist" {
 		t.Fatalf("pure Whist with standings was not preserved: %+v", tournaments)
+	}
+}
+
+func TestSourceKeepsExplicitStandingsLinksWhenEndpointFails(t *testing.T) {
+	var endpointCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		switch r.URL.Path {
+		case "/community":
+			_, _ = w.Write([]byte(`<a class="tournament-card" href="/community/tournaments/direct-failing/standings"><span class="name">Direct Failing</span><span class="date">August 24, 2026</span></a><a class="tournament-card" href="/community/tournaments/detail-failing"><span class="name">Detail Failing</span><span class="date">August 25, 2026</span></a><a class="tournament-card" href="/community/tournaments/no-link"><span class="name">No Link</span><span class="date">August 26, 2026</span></a>`))
+		case "/community/tournaments/direct-failing/standings":
+			endpointCalls++
+			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+		case "/community/tournaments/detail-failing":
+			_, _ = w.Write([]byte(`<h1>Detail Failing</h1><nav><a href="/community/tournaments/detail-failing/standings">Standings</a></nav>`))
+		case "/community/tournaments/detail-failing/standings":
+			endpointCalls++
+			http.NotFound(w, r)
+		case "/community/tournaments/no-link":
+			_, _ = w.Write([]byte(`<h1>No Link</h1><table><tr><th>#</th><th>Player</th></tr><tr><td>1</td><td>Not standings</td></tr></table>`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	source, err := NewSource(server.URL+"/community", server.Client(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tournaments, err := source.FetchTournaments(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[string]bool, len(tournaments))
+	for _, tournament := range tournaments {
+		seen[tournament.SourceID] = true
+	}
+	for _, id := range []string{"direct-failing", "detail-failing"} {
+		if !seen[id] {
+			t.Fatalf("explicit standings link was discarded after endpoint failure: %s in %+v", id, tournaments)
+		}
+	}
+	if seen["no-link"] {
+		t.Fatalf("detail page without explicit standings link was imported: %+v", tournaments)
+	}
+	if endpointCalls != 0 {
+		t.Fatalf("eligibility probe fetched failing standings endpoints; calls=%d", endpointCalls)
 	}
 }
 

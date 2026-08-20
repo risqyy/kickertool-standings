@@ -68,6 +68,33 @@ func (r *fakeStandingRepo) UpsertStandingSnapshot(context.Context, domain.Standi
 	return domain.StandingSyncResult{}, nil
 }
 
+type failingStandingSource struct{ calls int }
+
+func (s *failingStandingSource) FetchStandings(context.Context, domain.Tournament) (domain.StandingSnapshot, error) {
+	s.calls++
+	return domain.StandingSnapshot{}, errors.New("standings endpoint unavailable")
+}
+
+type failureStateRepo struct {
+	tournament domain.Tournament
+	marked     bool
+}
+
+func (r *failureStateRepo) UpsertMany(_ context.Context, _ []domain.Tournament) (domain.SyncResult, error) {
+	return domain.SyncResult{Inserted: 1}, nil
+}
+
+func (r *failureStateRepo) FindBySourceID(context.Context, string, string) (domain.Tournament, error) {
+	return r.tournament, nil
+}
+
+func (r *failureStateRepo) MarkStandingSyncFailed(_ context.Context, _, _ string) error {
+	r.marked = true
+	r.tournament.StandingsSyncComplete = false
+	r.tournament.LastStandingsSyncFailed = true
+	return nil
+}
+
 func (r *fakeRepo) UpsertMany(_ context.Context, ts []domain.Tournament) (domain.SyncResult, error) {
 	r.received = append(r.received, ts...)
 	return r.result, r.err
@@ -110,6 +137,34 @@ func TestCrawlerProcessesCompletedOnly(t *testing.T) {
 	result, err := crawler.Crawl(context.Background())
 	if err != nil || result.TournamentsProcessed != 2 || result.TournamentsSucceeded != 1 || result.TournamentsSkipped != 1 || standingSource.called != 1 || standingRepo.calls != 1 {
 		t.Fatalf("result=%+v source_calls=%d repo_calls=%d err=%v", result, standingSource.called, standingRepo.calls, err)
+	}
+}
+
+func TestCrawlerMarksFailedStandingsWithoutPersistingOrAggregatingSnapshot(t *testing.T) {
+	clock := &fixedClock{now: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)}
+	oldDate := time.Date(2025, 12, 31, 0, 0, 0, 0, time.UTC)
+	syncedAt := time.Date(2025, 12, 31, 1, 0, 0, 0, time.UTC)
+	tournament := domain.Tournament{Source: domain.KickertoolHTMLSource, SourceID: "failed", SourceKey: "failed", Name: "Failed Standings", URL: "https://example.test/tournaments/failed", Date: &oldDate}
+	state := &failureStateRepo{tournament: domain.Tournament{
+		Source: domain.KickertoolHTMLSource, SourceID: "failed", SourceKey: "failed", Name: "Failed Standings", URL: tournament.URL, Date: &oldDate,
+		StandingsSyncedAt: &syncedAt, StandingsSyncComplete: true,
+	}}
+	standingSource := &failingStandingSource{}
+	standingRepo := &fakeStandingRepo{}
+	crawler := NewCrawler(fakeSource{tournaments: []domain.Tournament{tournament}}, state, clock, nil, WithStandings(standingSource, standingRepo, state))
+
+	result, err := crawler.Crawl(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TournamentsProcessed != 1 || result.TournamentsFailed != 1 || result.TournamentsSucceeded != 0 {
+		t.Fatalf("unexpected crawl result: %+v", result)
+	}
+	if !state.marked || !state.tournament.LastStandingsSyncFailed || state.tournament.StandingsSyncComplete {
+		t.Fatalf("failed standings state was not persisted: marked=%v tournament=%+v", state.marked, state.tournament)
+	}
+	if standingSource.calls != 1 || standingRepo.calls != 0 {
+		t.Fatalf("failed snapshot was persisted or aggregated: source_calls=%d standing_repo_calls=%d", standingSource.calls, standingRepo.calls)
 	}
 }
 

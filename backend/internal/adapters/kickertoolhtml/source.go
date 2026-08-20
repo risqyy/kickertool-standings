@@ -100,12 +100,20 @@ func (s *Source) FetchTournaments(ctx context.Context) ([]domain.Tournament, err
 const maxStandingsProbePages = 8
 
 // standingsPageAvailable verifies the import criterion without requiring the
-// generic crawler to persist a listing-only tournament. Listing links may point
-// directly to /standings or to a detail page whose navigation contains that
-// link. Both forms are followed, but unrelated detail pages are not accepted.
+// generic crawler to persist a listing-only tournament. An explicit same-
+// tournament /standings URL is sufficient even when its endpoint is currently
+// unavailable; detail pages are loaded only to discover such links. Unrelated
+// detail pages and broad result/table links are not accepted.
 func (s *Source) standingsPageAvailable(ctx context.Context, tournament domain.Tournament) bool {
 	if strings.TrimSpace(tournament.URL) == "" {
 		return false
+	}
+	// A direct same-tournament standings link is already an existence proof.
+	// The generic crawler will perform the real fetch and mark a failed sync;
+	// eligibility must not discard the tournament just because that fetch is
+	// currently unavailable.
+	if isStandingsPageURL(tournament.URL) && s.candidateBelongsToTournament(tournament.URL, tournament) {
+		return true
 	}
 	discovered := []string{tournament.URL}
 	visited := make(map[string]struct{})
@@ -146,9 +154,10 @@ func (s *Source) standingsPageAvailable(ctx context.Context, tournament domain.T
 			if !isStandingsPageURL(candidate) {
 				continue
 			}
-			if _, exists := visited[candidate]; !exists {
-				discovered = append(discovered, candidate)
-			}
+			// The explicit same-tournament link is the criterion. Its endpoint
+			// may be temporarily unavailable; FetchStandings handles that error
+			// through the crawler's sync-failure state.
+			return true
 		}
 	}
 	return false
@@ -188,7 +197,8 @@ func isStandingsToken(value string) bool {
 // /tournaments/{id}/... routes and /xhr/{id}/... endpoints, so accept the
 // tournament ID only immediately after one of those route contexts. In
 // particular, a matching group ID or an arbitrary path component is not
-// evidence that a candidate belongs to this tournament.
+// evidence that a candidate belongs to this tournament. Explicit tournament
+// query parameters are a fallback only for URLs without either route context.
 func (s *Source) candidateBelongsToTournament(raw string, tournament domain.Tournament) bool {
 	wanted := strings.TrimSpace(tournament.SourceID)
 	if wanted == "" {
@@ -204,10 +214,15 @@ func (s *Source) candidateBelongsToTournament(raw string, tournament domain.Tour
 		if context != "tournaments" && context != "xhr" {
 			continue
 		}
-		if index+1 < len(segments) && sourceIDSegmentMatches(segments[index+1], wanted) {
-			return true
+		if index+1 >= len(segments) {
+			continue
 		}
+		// The first complete route context is authoritative. Do not let a
+		// nested /xhr/{id} or /tournaments/{id} context override it.
+		return sourceIDSegmentMatches(segments[index+1], wanted)
 	}
+	// No complete route context exists, so an explicit tournament-ID query
+	// parameter may identify query-only endpoints.
 	for key, values := range parsed.Query() {
 		key = strings.ToLower(strings.ReplaceAll(key, "-", "_"))
 		switch key {
