@@ -55,6 +55,16 @@ func (r *Repository) MergePlayers(ctx context.Context, sourcePlayerID, targetPla
 			result.AlreadyMerged = true
 			return nil
 		}
+		undoSnapshot, err := capturePlayerMergeState(tx, sourceRoot.ID, targetRoot.ID)
+		if err != nil {
+			return err
+		}
+		undoSnapshot.SourceBefore = *result.SourceBefore
+		undoSnapshot.TargetBefore = *result.TargetBefore
+		undoSnapshotJSON, _, err := encodePlayerMergeState(undoSnapshot)
+		if err != nil {
+			return err
+		}
 
 		if err := transferAliases(tx, sourceRoot.ID, targetRoot.ID, &result); err != nil {
 			return err
@@ -99,6 +109,14 @@ func (r *Repository) MergePlayers(ctx context.Context, sourcePlayerID, targetPla
 		} else {
 			result.TargetAfter = &aggregate
 		}
+		postMergeState, err := capturePlayerMergeState(tx, sourceRoot.ID, targetRoot.ID)
+		if err != nil {
+			return err
+		}
+		_, postMergeFingerprint, err := encodePlayerMergeState(postMergeState)
+		if err != nil {
+			return err
+		}
 		audit := PlayerMergeAuditModel{
 			SourcePlayerID: sourceRoot.ID, TargetPlayerID: targetRoot.ID,
 			SourceDisplayName: sourceRoot.DisplayName, TargetDisplayName: targetRoot.DisplayName,
@@ -107,6 +125,8 @@ func (r *Repository) MergePlayers(ctx context.Context, sourcePlayerID, targetPla
 			TransferredAllocations:      result.TransferredAllocations,
 			DeduplicatedAllocations:     result.DeduplicatedAllocations,
 			Actor:                       strings.TrimSpace(options.Actor), Reason: strings.TrimSpace(options.Reason),
+			UndoSnapshotVersion: playerMergeUndoSnapshotVersion, UndoSnapshotJSON: undoSnapshotJSON,
+			PostMergeFingerprint: postMergeFingerprint,
 		}
 		if err := tx.Create(&audit).Error; err != nil {
 			return fmt.Errorf("write player merge audit: %w", err)

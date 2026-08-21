@@ -2,9 +2,13 @@ package gormrepo
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"kickertool-ranking/internal/domain"
+	"kickertool-ranking/internal/ports"
 )
 
 func mergeStanding(tournamentID, standingID, playerID, name string, points int64, games, goals int) domain.TournamentStanding {
@@ -140,5 +144,144 @@ func TestMergePlayersDryRunRollsBackAndRejectsSelf(t *testing.T) {
 	}
 	if _, err := repo.MergePlayers(ctx, source.ID, source.ID, domain.PlayerMergeOptions{}); err == nil {
 		t.Fatal("expected self merge validation error")
+	}
+}
+
+func TestUndoPlayerMergeRestoresExactStateAndLeavesOtherPlayersUntouched(t *testing.T) {
+	clock := &mutableRepositoryClock{now: time.Date(2026, time.August, 21, 9, 0, 0, 0, time.UTC)}
+	repo, db := testRepoWithClock(t, clock)
+	ctx := context.Background()
+	if _, err := repo.UpsertMany(ctx, []domain.Tournament{tournament("undo-t1", "First"), tournament("undo-t2", "Second"), tournament("undo-t3", "Other")}); err != nil {
+		t.Fatal(err)
+	}
+	sourceStanding := mergeStanding("undo-t1", "undo-source", "undo-source-id", "Undo Source", 100, 2, 1)
+	targetCollision := mergeStanding("undo-t1", "undo-target-collision", "undo-target-id", "Undo Target", 150, 3, 2)
+	targetSecond := mergeStanding("undo-t2", "undo-target-second", "undo-target-id", "Undo Target", 250, 5, 3)
+	otherStanding := mergeStanding("undo-t3", "undo-other", "undo-other-id", "Other Player", 300, 6, 4)
+	for _, snapshot := range []domain.StandingSnapshot{mergeSnapshot(sourceStanding), mergeSnapshot(targetCollision), mergeSnapshot(targetSecond), mergeSnapshot(otherStanding)} {
+		if _, err := repo.UpsertStandingSnapshot(ctx, snapshot); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var source, target, other PlayerModel
+	for name, destination := range map[string]*PlayerModel{"Undo Source": &source, "Undo Target": &target, "Other Player": &other} {
+		if err := db.Where("canonical_name_key = ?", domain.PlayerKey(name)).First(destination).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	correction := ManualRankingCorrectionModel{
+		PlayerRef: source.ID, PlayerKey: source.CanonicalNameKey, EffectiveDate: clock.now.Add(-time.Hour), EffectiveYear: 2026,
+		TournamentCountDelta: 1, GamesPlayedDelta: 1, PointsCentsDelta: 25, GoalDifferenceDelta: 1,
+		Reason: "source correction", Administrator: "tester", CreatedAt: clock.now.Add(-time.Hour), Status: manualCorrectionActive, Revision: 1, Version: 1,
+	}
+	if err := db.Create(&correction).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.recalculatePlayerAggregates(db, source, clock.now); err != nil {
+		t.Fatal(err)
+	}
+	before, err := capturePlayerMergeState(db, source.ID, target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeJSON, _, err := encodePlayerMergeState(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var otherRowsBefore int64
+	if err := db.Model(&StandingModel{}).Where("player_ref = ?", other.ID).Count(&otherRowsBefore).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	mergeResult, err := repo.MergePlayers(ctx, source.ID, target.ID, domain.PlayerMergeOptions{Actor: "tester", Reason: "undo test"})
+	if err != nil || mergeResult.DeduplicatedAllocations == 0 {
+		t.Fatalf("merge=%+v err=%v", mergeResult, err)
+	}
+	merges, err := repo.ListPlayerMerges(ctx)
+	if err != nil || len(merges) != 1 || !merges[0].UndoAvailable {
+		t.Fatalf("merge history=%+v err=%v", merges, err)
+	}
+	preview, err := repo.PreviewPlayerMergeUndo(ctx, merges[0].ID)
+	if err != nil || preview.StateFingerprint == "" || preview.SourceBefore.PlayerName != source.DisplayName || preview.TargetBefore.PlayerName != target.DisplayName {
+		t.Fatalf("undo preview=%+v err=%v", preview, err)
+	}
+	undoResult, err := repo.UndoPlayerMerge(ctx, merges[0].ID, domain.PlayerMergeUndoOptions{Actor: "tester", Reason: "wrong players", ExpectedFingerprint: preview.StateFingerprint})
+	if err != nil {
+		t.Fatalf("undo: %+v %v", undoResult, err)
+	}
+	after, err := capturePlayerMergeState(db, source.ID, target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterJSON, _, err := encodePlayerMergeState(after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeJSON != afterJSON {
+		t.Fatalf("restored state differs from pre-merge state\nbefore=%s\nafter=%s", beforeJSON, afterJSON)
+	}
+	var otherRowsAfter int64
+	if err := db.Model(&StandingModel{}).Where("player_ref = ?", other.ID).Count(&otherRowsAfter).Error; err != nil || otherRowsAfter != otherRowsBefore {
+		t.Fatalf("other player changed before=%d after=%d err=%v", otherRowsBefore, otherRowsAfter, err)
+	}
+	var correctionAfter ManualRankingCorrectionModel
+	if err := db.First(&correctionAfter, correction.ID).Error; err != nil || correctionAfter.PlayerRef != source.ID || correctionAfter.PlayerKey != source.CanonicalNameKey {
+		t.Fatalf("correction not restored=%+v err=%v", correctionAfter, err)
+	}
+	merges, err = repo.ListPlayerMerges(ctx)
+	if err != nil || len(merges) != 1 || merges[0].UndoAvailable || merges[0].UndoneAt == nil || merges[0].UndoneBy != "tester" {
+		t.Fatalf("undone history=%+v err=%v", merges, err)
+	}
+	if _, err := repo.PreviewPlayerMergeUndo(ctx, merges[0].ID); !errors.Is(err, ports.ErrPlayerMergeUndoUnavailable) {
+		t.Fatalf("repeated undo preview error=%v", err)
+	}
+}
+
+func TestUndoPlayerMergeRejectsLegacyAndChangedStateWithoutPartialWrites(t *testing.T) {
+	repo, db := testRepo(t)
+	ctx := context.Background()
+	legacy := PlayerMergeAuditModel{SourcePlayerID: 1, TargetPlayerID: 2, SourceDisplayName: "Legacy Source", TargetDisplayName: "Legacy Target", MergedAt: time.Now()}
+	if err := db.Create(&legacy).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.PreviewPlayerMergeUndo(ctx, legacy.ID); !errors.Is(err, ports.ErrPlayerMergeUndoUnavailable) {
+		t.Fatalf("legacy preview error=%v", err)
+	}
+
+	if _, err := repo.UpsertMany(ctx, []domain.Tournament{tournament("changed-t1", "Changed")}); err != nil {
+		t.Fatal(err)
+	}
+	for _, standing := range []domain.TournamentStanding{
+		mergeStanding("changed-t1", "changed-source-row", "changed-source-id", "Changed Source", 100, 1, 0),
+		mergeStanding("changed-t1", "changed-target-row", "changed-target-id", "Changed Target", 200, 2, 0),
+	} {
+		if _, err := repo.UpsertStandingSnapshot(ctx, mergeSnapshot(standing)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var source, target PlayerModel
+	db.Where("canonical_name_key = ?", domain.PlayerKey("Changed Source")).First(&source)
+	db.Where("canonical_name_key = ?", domain.PlayerKey("Changed Target")).First(&target)
+	if _, err := repo.MergePlayers(ctx, source.ID, target.ID, domain.PlayerMergeOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	merges, err := repo.ListPlayerMerges(ctx)
+	if err != nil || len(merges) != 2 {
+		t.Fatalf("merges=%+v err=%v", merges, err)
+	}
+	changedMerge := merges[0]
+	if err := db.Model(&target).Update("display_name", "Changed After Merge").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.PreviewPlayerMergeUndo(ctx, changedMerge.ID); !errors.Is(err, ports.ErrVersionConflict) {
+		t.Fatalf("changed preview error=%v", err)
+	}
+	merges, err = repo.ListPlayerMerges(ctx)
+	if err != nil || merges[0].UndoAvailable || !strings.Contains(merges[0].UndoUnavailableReason, "geändert") {
+		t.Fatalf("changed merge history should explain unavailable undo: merges=%+v err=%v", merges, err)
+	}
+	var sourceAfter PlayerModel
+	if err := db.First(&sourceAfter, source.ID).Error; err != nil || sourceAfter.MergedIntoPlayerID == nil || *sourceAfter.MergedIntoPlayerID != target.ID {
+		t.Fatalf("failed undo partially restored source=%+v err=%v", sourceAfter, err)
 	}
 }

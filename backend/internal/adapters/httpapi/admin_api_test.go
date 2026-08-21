@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -344,5 +345,79 @@ func TestManualCorrectionRevokeRequiresCSRFAndRejectsStaleVersion(t *testing.T) 
 	}
 	if response := makeRequest(cookie.Value, `{"expectedVersion":2,"reason":"valid revoke","confirmed":true}`); response.Code != http.StatusOK || corrections.revoked != 1 {
 		t.Fatalf("valid revoke status=%d revoked=%d body=%s", response.Code, corrections.revoked, response.Body.String())
+	}
+}
+
+func TestPlayerMergeUndoHistoryPreviewAndConfirmedRestore(t *testing.T) {
+	logger := zerolog.Nop()
+	mergedAt := time.Date(2026, time.August, 21, 8, 0, 0, 0, time.UTC)
+	undoneAt := mergedAt.Add(time.Hour)
+	merge := domain.PlayerMergeAudit{ID: 9, SourcePlayerID: 1, TargetPlayerID: 2, SourceDisplayName: "Quelle", TargetDisplayName: "Ziel", MergedAt: mergedAt, UndoAvailable: true}
+	merger := &fakePlayerMerger{
+		merges:      []domain.PlayerMergeAudit{merge},
+		undoPreview: domain.PlayerMergeUndoPreview{Merge: merge, SourceBefore: domain.PlayerAggregate{PlayerName: "Quelle", TournamentCount: 1}, TargetBefore: domain.PlayerAggregate{PlayerName: "Ziel", TournamentCount: 2}, StateFingerprint: "undo-fingerprint"},
+		undoResult:  domain.PlayerMergeUndoResult{Merge: merge, SourceAfter: domain.PlayerAggregate{PlayerName: "Quelle", TournamentCount: 1}, TargetAfter: domain.PlayerAggregate{PlayerName: "Ziel", TournamentCount: 2}, UndoneAt: undoneAt},
+	}
+	handler := NewAdminAPIHandler(&fakeTournamentAdminRepository{}, fakePlayerDirectory{profiles: map[uint]domain.PlayerProfile{}}, merger, &logger)
+
+	historyResponse := httptest.NewRecorder()
+	handler.ServeHTTP(historyResponse, httptest.NewRequest(http.MethodGet, "/api/admin/players/merges", nil))
+	if historyResponse.Code != http.StatusOK || !strings.Contains(historyResponse.Body.String(), `"undoAvailable":true`) || !strings.Contains(historyResponse.Body.String(), `"sourceDisplayName":"Quelle"`) {
+		t.Fatalf("history status=%d body=%s", historyResponse.Code, historyResponse.Body.String())
+	}
+
+	sessionResponse := httptest.NewRecorder()
+	handler.ServeHTTP(sessionResponse, httptest.NewRequest(http.MethodGet, "/api/admin/session", nil))
+	cookie := sessionResponse.Result().Cookies()[0]
+	mutation := func(path, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-CSRF-Token", cookie.Value)
+		request.AddCookie(cookie)
+		request = request.WithContext(context.WithValue(request.Context(), adminActorContextKey{}, "operator"))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	previewResponse := mutation("/api/admin/players/merges/9/undo/preview", `{}`)
+	if previewResponse.Code != http.StatusOK || !strings.Contains(previewResponse.Body.String(), `"sourceBefore"`) {
+		t.Fatalf("preview status=%d body=%s", previewResponse.Code, previewResponse.Body.String())
+	}
+	var previewPayload struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(previewResponse.Body.Bytes(), &previewPayload); err != nil || previewPayload.Token == "" {
+		t.Fatalf("preview payload=%s err=%v", previewResponse.Body.String(), err)
+	}
+	if response := mutation("/api/admin/players/merges/9/undo/confirm", `{"token":"`+previewPayload.Token+`","confirmed":false}`); response.Code != http.StatusBadRequest || merger.undoCalls != 0 {
+		t.Fatalf("unconfirmed status=%d calls=%d body=%s", response.Code, merger.undoCalls, response.Body.String())
+	}
+	confirmResponse := mutation("/api/admin/players/merges/9/undo/confirm", `{"token":"`+previewPayload.Token+`","confirmed":true,"reason":"Falsche Spieler"}`)
+	if confirmResponse.Code != http.StatusOK || merger.undoCalls != 1 || !strings.Contains(confirmResponse.Body.String(), `"sourceAfter"`) {
+		t.Fatalf("confirm status=%d calls=%d body=%s", confirmResponse.Code, merger.undoCalls, confirmResponse.Body.String())
+	}
+	if merger.undoOptions.Actor != "operator" || merger.undoOptions.Reason != "Falsche Spieler" || merger.undoOptions.ExpectedFingerprint != "undo-fingerprint" {
+		t.Fatalf("undo options=%+v", merger.undoOptions)
+	}
+	if response := mutation("/api/admin/players/merges/9/undo/confirm", `{"token":"`+previewPayload.Token+`","confirmed":true}`); response.Code != http.StatusOK || merger.undoCalls != 1 {
+		t.Fatalf("idempotent confirm status=%d calls=%d body=%s", response.Code, merger.undoCalls, response.Body.String())
+	}
+}
+
+func TestPlayerMergeUndoReturnsUnderstandableConflictForLegacyAudit(t *testing.T) {
+	logger := zerolog.Nop()
+	merger := &fakePlayerMerger{previewErr: fmt.Errorf("%w: Für diese ältere Zusammenführung fehlen vollständige Wiederherstellungsdaten.", ports.ErrPlayerMergeUndoUnavailable)}
+	handler := NewAdminAPIHandler(&fakeTournamentAdminRepository{}, fakePlayerDirectory{profiles: map[uint]domain.PlayerProfile{}}, merger, &logger)
+	sessionResponse := httptest.NewRecorder()
+	handler.ServeHTTP(sessionResponse, httptest.NewRequest(http.MethodGet, "/api/admin/session", nil))
+	cookie := sessionResponse.Result().Cookies()[0]
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/players/merges/7/undo/preview", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", cookie.Value)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict || strings.Contains(response.Body.String(), ports.ErrPlayerMergeUndoUnavailable.Error()) || !strings.Contains(response.Body.String(), "Wiederherstellungsdaten") || !strings.Contains(response.Body.String(), `"code":"player_merge_undo_unavailable"`) {
+		t.Fatalf("legacy status=%d body=%s", response.Code, response.Body.String())
 	}
 }

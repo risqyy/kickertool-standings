@@ -161,3 +161,36 @@ export interface MergeResult {
   targetBefore: Nullable<MergeAggregate>
   targetAfter: Nullable<MergeAggregate>
 }
+
+export interface PlayerMergeAudit {
+  id: number
+  sourcePlayerId: number
+  targetPlayerId: number
+  sourceDisplayName: string
+  targetDisplayName: string
+  mergedAt: string
+  transferredAliases: number
+  transferredSourceIdentities: number
+  transferredAllocations: number
+  deduplicatedAllocations: number
+  actor: string
+  reason: string
+  undoAvailable: boolean
+  undoUnavailableReason: string
+  undoneAt: Nullable<string>
+  undoneBy: string
+  undoReason: string
+}
+
+export interface PlayerMergeUndoPreview {
+  merge: PlayerMergeAudit
+  sourceBefore: MergeAggregate
+  targetBefore: MergeAggregate
+}
+
+export interface PlayerMergeUndoResult {
+  merge: PlayerMergeAudit
+  sourceAfter: MergeAggregate
+  targetAfter: MergeAggregate
+  undoneAt: string
+}

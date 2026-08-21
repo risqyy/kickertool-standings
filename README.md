@@ -24,7 +24,7 @@ Set `TOURNAMENT_SOURCE` to exactly `api` or `html`. API mode requires `TOURNAMEN
 
 The scheduler runs immediately and then every 15 minutes without overlap. It retries temporary HTTP failures, handles cancellation, keeps failed/incomplete snapshots from overwriting complete data, finalizes completed tournaments after two identical complete snapshots, and never deletes missing source rows. Points are integer hundredths; PPG is computed only from known non-zero games and rounded commercially to two decimals. Wins, losses and draws are not part of the model or output.
 
-Player identity is the normalized NFC name: trim, collapse all whitespace runs to one ASCII space, Unicode-aware lowercase, without removing diacritics. Aliases and source identities preserve provenance. Manual merges transfer aliases and allocations transactionally, retain the source as a merged tombstone, deduplicate shared allocations, and recalculate the target aggregate from raw included results.
+Player identity is the normalized NFC name: trim, collapse all whitespace runs to one ASCII space, Unicode-aware lowercase, without removing diacritics. Aliases and source identities preserve provenance. Manual merges transfer aliases and allocations transactionally, retain the source as a merged tombstone, deduplicate shared allocations, and recalculate the target aggregate from raw included results. Each new merge also stores an exact recovery snapshot and post-merge fingerprint: administrators can preview and confirm an atomic undo while the participants remain unchanged. Older merges without snapshots are shown as unavailable instead of being partially restored.
 
 ## Configuration
 

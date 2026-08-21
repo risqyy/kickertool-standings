@@ -230,6 +230,12 @@ type PlayerMergeAuditModel struct {
 	DeduplicatedAllocations     int       `gorm:"not null"`
 	Actor                       string
 	Reason                      string
+	UndoSnapshotVersion         int `gorm:"not null;default:0"`
+	UndoSnapshotJSON            string
+	PostMergeFingerprint        string
+	UndoneAt                    *time.Time `gorm:"index"`
+	UndoneBy                    string
+	UndoReason                  string
 	CreatedAt                   time.Time
 }
 
