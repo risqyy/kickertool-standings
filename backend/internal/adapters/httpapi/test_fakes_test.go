@@ -31,7 +31,15 @@ func (f fakePlayerDirectory) GetPlayerProfile(_ context.Context, playerID uint) 
 }
 
 type fakePlayerMerger struct {
-	result domain.MergeResult
+	result      domain.MergeResult
+	merges      []domain.PlayerMergeAudit
+	undoPreview domain.PlayerMergeUndoPreview
+	undoResult  domain.PlayerMergeUndoResult
+	undoOptions domain.PlayerMergeUndoOptions
+	listErr     error
+	previewErr  error
+	undoErr     error
+	undoCalls   int
 }
 
 func (f *fakePlayerMerger) MergePlayers(_ context.Context, sourcePlayerID, targetPlayerID uint, options domain.PlayerMergeOptions) (domain.MergeResult, error) {
@@ -39,5 +47,29 @@ func (f *fakePlayerMerger) MergePlayers(_ context.Context, sourcePlayerID, targe
 	result.SourcePlayerID = sourcePlayerID
 	result.TargetPlayerID = targetPlayerID
 	result.DryRun = options.DryRun
+	return result, nil
+}
+
+func (f *fakePlayerMerger) ListPlayerMerges(context.Context) ([]domain.PlayerMergeAudit, error) {
+	return f.merges, f.listErr
+}
+
+func (f *fakePlayerMerger) PreviewPlayerMergeUndo(_ context.Context, mergeID uint) (domain.PlayerMergeUndoPreview, error) {
+	if f.previewErr != nil {
+		return domain.PlayerMergeUndoPreview{}, f.previewErr
+	}
+	result := f.undoPreview
+	result.Merge.ID = mergeID
+	return result, nil
+}
+
+func (f *fakePlayerMerger) UndoPlayerMerge(_ context.Context, mergeID uint, options domain.PlayerMergeUndoOptions) (domain.PlayerMergeUndoResult, error) {
+	f.undoCalls++
+	if f.undoErr != nil {
+		return domain.PlayerMergeUndoResult{}, f.undoErr
+	}
+	f.undoOptions = options
+	result := f.undoResult
+	result.Merge.ID = mergeID
 	return result, nil
 }

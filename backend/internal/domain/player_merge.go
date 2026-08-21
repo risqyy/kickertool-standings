@@ -43,3 +43,43 @@ type MergeResult struct {
 	TargetBefore                *PlayerAggregate
 	TargetAfter                 *PlayerAggregate
 }
+
+type PlayerMergeAudit struct {
+	ID                          uint
+	SourcePlayerID              uint
+	TargetPlayerID              uint
+	SourceDisplayName           string
+	TargetDisplayName           string
+	MergedAt                    time.Time
+	TransferredAliases          int
+	TransferredSourceIdentities int
+	TransferredAllocations      int
+	DeduplicatedAllocations     int
+	Actor                       string
+	Reason                      string
+	UndoAvailable               bool
+	UndoUnavailableReason       string
+	UndoneAt                    *time.Time
+	UndoneBy                    string
+	UndoReason                  string
+}
+
+type PlayerMergeUndoPreview struct {
+	Merge            PlayerMergeAudit
+	SourceBefore     PlayerAggregate
+	TargetBefore     PlayerAggregate
+	StateFingerprint string
+}
+
+type PlayerMergeUndoOptions struct {
+	Actor               string
+	Reason              string
+	ExpectedFingerprint string
+}
+
+type PlayerMergeUndoResult struct {
+	Merge       PlayerMergeAudit
+	SourceAfter PlayerAggregate
+	TargetAfter PlayerAggregate
+	UndoneAt    time.Time
+}

@@ -166,6 +166,66 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/admin/players/merges:
+    get:
+      security: [{ basicAuth: [] }]
+      operationId: listPlayerMerges
+      responses:
+        '200':
+          description: Newest-first audit history, including whether each merge can be safely undone.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/PlayerMergeAudit' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/v1/admin/players/merges/{mergeId}/undo/preview:
+    post:
+      security: [{ basicAuth: [] }]
+      operationId: previewPlayerMergeUndo
+      parameters:
+        - { name: mergeId, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      responses:
+        '200':
+          description: Exact pre-merge player aggregates and a short-lived confirmation token.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerMergeUndoPreviewResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/PlayerMergeUndoConflict' }
+  /api/v1/admin/players/merges/{mergeId}/undo/confirm:
+    post:
+      security: [{ basicAuth: [] }]
+      operationId: confirmPlayerMergeUndo
+      parameters:
+        - { name: mergeId, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, confirmed]
+              properties:
+                token: { type: string }
+                confirmed: { type: boolean, const: true }
+                reason: { type: string, maxLength: 500 }
+      responses:
+        '200':
+          description: Idempotent result after exact restoration of both original players and their references.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerMergeUndoResult' }
+        '400': { description: Explicit confirmation is missing. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/PlayerMergeUndoConflict' }
   /api/v1/admin/players/{id}/corrections:
     get:
       security: [{ basicAuth: [] }]
@@ -330,6 +390,47 @@ components:
         pointsPerGameCents: { type: integer, format: int64, nullable: true }
         goalDifference: { type: integer, nullable: true }
         rankingCorrectionVersion: { type: integer, format: int64 }
+    PlayerMergeAudit:
+      type: object
+      required: [id, sourcePlayerId, targetPlayerId, sourceDisplayName, targetDisplayName, mergedAt, transferredAliases, transferredSourceIdentities, transferredAllocations, deduplicatedAllocations, actor, reason, undoAvailable, undoUnavailableReason, undoneAt, undoneBy, undoReason]
+      properties:
+        id: { type: integer }
+        sourcePlayerId: { type: integer }
+        targetPlayerId: { type: integer }
+        sourceDisplayName: { type: string }
+        targetDisplayName: { type: string }
+        mergedAt: { type: string, format: date-time }
+        transferredAliases: { type: integer }
+        transferredSourceIdentities: { type: integer }
+        transferredAllocations: { type: integer }
+        deduplicatedAllocations: { type: integer }
+        actor: { type: string }
+        reason: { type: string }
+        undoAvailable: { type: boolean }
+        undoUnavailableReason: { type: string }
+        undoneAt: { type: string, format: date-time, nullable: true }
+        undoneBy: { type: string }
+        undoReason: { type: string }
+    PlayerMergeUndoPreviewResponse:
+      type: object
+      required: [token, preview]
+      properties:
+        token: { type: string }
+        preview:
+          type: object
+          required: [merge, sourceBefore, targetBefore]
+          properties:
+            merge: { $ref: '#/components/schemas/PlayerMergeAudit' }
+            sourceBefore: { $ref: '#/components/schemas/RankingAggregate' }
+            targetBefore: { $ref: '#/components/schemas/RankingAggregate' }
+    PlayerMergeUndoResult:
+      type: object
+      required: [merge, sourceAfter, targetAfter, undoneAt]
+      properties:
+        merge: { $ref: '#/components/schemas/PlayerMergeAudit' }
+        sourceAfter: { $ref: '#/components/schemas/RankingAggregate' }
+        targetAfter: { $ref: '#/components/schemas/RankingAggregate' }
+        undoneAt: { type: string, format: date-time }
     ManualRankingCorrectionInput:
       type: object
       required: [effectiveDate, reason]
@@ -435,4 +536,14 @@ components:
     Forbidden: { description: CSRF, origin, or mutation validation failure. }
     NotFound: { description: Resource not found. }
     Conflict: { description: Optimistic version or stale merge-plan conflict. }
+    PlayerMergeUndoConflict:
+      description: The merge is legacy, already undone, or its participants changed after merging, so exact restoration is unsafe.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error, code]
+            properties:
+              error: { type: string }
+              code: { type: string, enum: [player_merge_undo_unavailable] }
     InternalError: { description: Internal backend error. }

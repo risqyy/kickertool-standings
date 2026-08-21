@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ApiError, confirmManualCorrection, getAdminSession, getRankings, previewManualCorrection, previewMerge, revokeManualCorrection } from './client'
+import { ApiError, confirmManualCorrection, confirmPlayerMergeUndo, getAdminSession, getRankings, listPlayerMerges, previewManualCorrection, previewMerge, previewPlayerMergeUndo, revokeManualCorrection } from './client'
 
 describe('public rankings API', () => {
   it('adds the selected year as a query parameter and keeps the overall URL unchanged', async () => {
@@ -73,5 +73,26 @@ describe('manual ranking corrections API', () => {
     expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/admin/players/corrections/confirm')
     expect(fetchMock.mock.calls[2][0]).toBe('/api/v1/admin/players/7/corrections/9/revoke')
     expect(JSON.parse((fetchMock.mock.calls[2][1] as RequestInit).body as string).reason).toBe('Aufhebung dokumentiert')
+  })
+})
+
+describe('player merge undo API', () => {
+  it('uses the history, preview and explicit confirmation contracts', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ items: [] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ token: 'undo-token', preview: {} }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ merge: {}, sourceAfter: {}, targetAfter: {}, undoneAt: '2026-08-21T09:00:00Z' }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await listPlayerMerges()
+    await previewPlayerMergeUndo('csrf-token', 12)
+    await confirmPlayerMergeUndo('csrf-token', 12, 'undo-token', 'Versehentlich zusammengeführt')
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/admin/players/merges')
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/admin/players/merges/12/undo/preview')
+    expect(fetchMock.mock.calls[2][0]).toBe('/api/v1/admin/players/merges/12/undo/confirm')
+    const init = fetchMock.mock.calls[2][1] as RequestInit
+    expect(new Headers(init.headers).get('X-CSRF-Token')).toBe('csrf-token')
+    expect(JSON.parse(init.body as string)).toEqual({ token: 'undo-token', reason: 'Versehentlich zusammengeführt', confirmed: true })
   })
 })

@@ -29,6 +29,7 @@ type TournamentRepository interface {
 }
 
 var ErrVersionConflict = errors.New("version conflict")
+var ErrPlayerMergeUndoUnavailable = errors.New("player merge undo unavailable")
 
 type TournamentAdminRepository interface {
 	ListTournaments(ctx context.Context, filter domain.TournamentListFilter) (domain.TournamentPage, error)
@@ -67,6 +68,9 @@ type SnapshotRankingReader interface {
 
 type PlayerMergeService interface {
 	MergePlayers(ctx context.Context, sourcePlayerID, targetPlayerID uint, options domain.PlayerMergeOptions) (domain.MergeResult, error)
+	ListPlayerMerges(ctx context.Context) ([]domain.PlayerMergeAudit, error)
+	PreviewPlayerMergeUndo(ctx context.Context, mergeID uint) (domain.PlayerMergeUndoPreview, error)
+	UndoPlayerMerge(ctx context.Context, mergeID uint, options domain.PlayerMergeUndoOptions) (domain.PlayerMergeUndoResult, error)
 }
 
 type PlayerDirectory interface {

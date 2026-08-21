@@ -61,6 +61,7 @@ type AdminAPIHandler struct {
 	logger          *zerolog.Logger
 	mu              sync.Mutex
 	plans           map[string]adminMergePlan
+	undoPlans       map[string]adminMergeUndoPlan
 	correctionPlans map[string]manualCorrectionPlan
 }
 
@@ -72,6 +73,14 @@ type adminMergePlan struct {
 	ExpiresAt          time.Time
 	Result             domain.MergeResult
 	Completed          *domain.MergeResult
+}
+
+type adminMergeUndoPlan struct {
+	MergeID          uint
+	StateFingerprint string
+	ExpiresAt        time.Time
+	Preview          domain.PlayerMergeUndoPreview
+	Completed        *domain.PlayerMergeUndoResult
 }
 
 type manualCorrectionPlan struct {
@@ -100,7 +109,7 @@ func NewAdminAPIHandler(tournaments ports.TournamentAdminRepository, directory p
 	} else if value, ok := tournaments.(ports.ManualRankingCorrectionRepository); ok {
 		corrections = value
 	}
-	return &AdminAPIHandler{tournaments: tournaments, directory: directory, merger: merger, corrections: corrections, logger: logger, plans: make(map[string]adminMergePlan), correctionPlans: make(map[string]manualCorrectionPlan)}
+	return &AdminAPIHandler{tournaments: tournaments, directory: directory, merger: merger, corrections: corrections, logger: logger, plans: make(map[string]adminMergePlan), undoPlans: make(map[string]adminMergeUndoPlan), correctionPlans: make(map[string]manualCorrectionPlan)}
 }
 
 func (h *AdminAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -124,6 +133,12 @@ func (h *AdminAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.setInclusion(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/admin/players/search":
 		h.playerSearch(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/admin/players/merges":
+		h.playerMergeList(w, r)
+	case r.Method == http.MethodPost && h.isPlayerMergeUndoPath(r.URL.Path, "preview"):
+		h.playerMergeUndoPreview(w, r)
+	case r.Method == http.MethodPost && h.isPlayerMergeUndoPath(r.URL.Path, "confirm"):
+		h.playerMergeUndoConfirm(w, r)
 	case r.Method == http.MethodGet && h.isCorrectionListPath(r.URL.Path):
 		h.correctionList(w, r)
 	case r.Method == http.MethodPost && h.isCorrectionPreviewPath(r.URL.Path):
@@ -385,6 +400,116 @@ func (h *AdminAPIHandler) mergeConfirm(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"alreadyMerged": result.AlreadyMerged, "result": mergeResultDTO(result)})
 }
 
+func (h *AdminAPIHandler) playerMergeList(w http.ResponseWriter, r *http.Request) {
+	merges, err := h.merger.ListPlayerMerges(r.Context())
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, "player merge history unavailable")
+		return
+	}
+	items := make([]map[string]any, 0, len(merges))
+	for _, merge := range merges {
+		items = append(items, playerMergeAuditDTO(merge))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (h *AdminAPIHandler) isPlayerMergeUndoPath(path, action string) bool {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 7 || parts[0] != "api" || parts[1] != "admin" || parts[2] != "players" || parts[3] != "merges" || parts[5] != "undo" || parts[6] != action {
+		return false
+	}
+	id, err := strconv.ParseUint(parts[4], 10, 64)
+	return err == nil && id > 0
+}
+
+func playerMergeIDFromUndoPath(path string) (uint, error) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 7 {
+		return 0, errors.New("invalid player merge undo path")
+	}
+	id, err := strconv.ParseUint(parts[4], 10, 64)
+	if err != nil || id == 0 {
+		return 0, errors.New("invalid player merge id")
+	}
+	return uint(id), nil
+}
+
+func (h *AdminAPIHandler) playerMergeUndoPreview(w http.ResponseWriter, r *http.Request) {
+	mergeID, err := playerMergeIDFromUndoPath(r.URL.Path)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid player merge id")
+		return
+	}
+	preview, err := h.merger.PreviewPlayerMergeUndo(r.Context(), mergeID)
+	if err != nil {
+		h.writePlayerMergeUndoError(w, err)
+		return
+	}
+	token := randomAdminToken()
+	h.mu.Lock()
+	h.undoPlans[token] = adminMergeUndoPlan{MergeID: mergeID, StateFingerprint: preview.StateFingerprint, ExpiresAt: time.Now().Add(5 * time.Minute), Preview: preview}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"token": token, "preview": playerMergeUndoPreviewDTO(preview)})
+}
+
+func (h *AdminAPIHandler) playerMergeUndoConfirm(w http.ResponseWriter, r *http.Request) {
+	mergeID, err := playerMergeIDFromUndoPath(r.URL.Path)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid player merge id")
+		return
+	}
+	var input struct {
+		Token     string `json:"token"`
+		Confirmed bool   `json:"confirmed"`
+		Reason    string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil || strings.TrimSpace(input.Token) == "" || !input.Confirmed {
+		h.writeError(w, http.StatusBadRequest, "confirmation is required")
+		return
+	}
+	h.mu.Lock()
+	plan, ok := h.undoPlans[input.Token]
+	h.mu.Unlock()
+	if !ok || plan.MergeID != mergeID || time.Now().After(plan.ExpiresAt) {
+		h.writeError(w, http.StatusConflict, "undo preview expired; create a new preview")
+		return
+	}
+	if plan.Completed != nil {
+		writeJSON(w, http.StatusOK, playerMergeUndoResultDTO(*plan.Completed))
+		return
+	}
+	result, err := h.merger.UndoPlayerMerge(r.Context(), mergeID, domain.PlayerMergeUndoOptions{Actor: adminActor(r.Context()), Reason: input.Reason, ExpectedFingerprint: plan.StateFingerprint})
+	if err != nil {
+		h.writePlayerMergeUndoError(w, err)
+		return
+	}
+	h.mu.Lock()
+	plan.Completed = &result
+	h.undoPlans[input.Token] = plan
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, playerMergeUndoResultDTO(result))
+}
+
+func (h *AdminAPIHandler) writePlayerMergeUndoError(w http.ResponseWriter, err error) {
+	message := playerMergeUndoErrorMessage(err)
+	switch {
+	case errors.Is(err, ports.ErrNotFound):
+		h.writeError(w, http.StatusNotFound, "player merge not found")
+	case errors.Is(err, ports.ErrVersionConflict), errors.Is(err, ports.ErrPlayerMergeUndoUnavailable):
+		h.writeJSONError(w, http.StatusConflict, message, map[string]any{"code": "player_merge_undo_unavailable"})
+	default:
+		h.writeError(w, http.StatusInternalServerError, "player merge undo failed")
+	}
+}
+
+func playerMergeUndoErrorMessage(err error) string {
+	message := err.Error()
+	for _, sentinel := range []error{ports.ErrPlayerMergeUndoUnavailable, ports.ErrVersionConflict} {
+		message = strings.TrimSpace(strings.TrimPrefix(message, sentinel.Error()+":"))
+	}
+	return message
+}
+
 type tournamentDTO struct {
 	ID                 uint       `json:"id"`
 	Source             string     `json:"source"`
@@ -454,6 +579,27 @@ func playerDTOFrom(profile domain.PlayerProfile) playerDTO {
 
 func mergeResultDTO(result domain.MergeResult) map[string]any {
 	return map[string]any{"sourcePlayerId": result.SourcePlayerID, "targetPlayerId": result.TargetPlayerID, "sourceDisplayName": result.SourceDisplayName, "targetDisplayName": result.TargetDisplayName, "alreadyMerged": result.AlreadyMerged, "transferredAliases": result.TransferredAliases, "transferredSourceIdentities": result.TransferredSourceIdentities, "transferredAllocations": result.TransferredAllocations, "deduplicatedAllocations": result.DeduplicatedAllocations, "sourceBefore": playerAggregateDTO(result.SourceBefore), "targetBefore": playerAggregateDTO(result.TargetBefore), "targetAfter": playerAggregateDTO(result.TargetAfter)}
+}
+
+func playerMergeAuditDTO(merge domain.PlayerMergeAudit) map[string]any {
+	return map[string]any{
+		"id": merge.ID, "sourcePlayerId": merge.SourcePlayerID, "targetPlayerId": merge.TargetPlayerID,
+		"sourceDisplayName": merge.SourceDisplayName, "targetDisplayName": merge.TargetDisplayName,
+		"mergedAt": merge.MergedAt, "transferredAliases": merge.TransferredAliases,
+		"transferredSourceIdentities": merge.TransferredSourceIdentities,
+		"transferredAllocations":      merge.TransferredAllocations, "deduplicatedAllocations": merge.DeduplicatedAllocations,
+		"actor": merge.Actor, "reason": merge.Reason, "undoAvailable": merge.UndoAvailable,
+		"undoUnavailableReason": merge.UndoUnavailableReason, "undoneAt": merge.UndoneAt,
+		"undoneBy": merge.UndoneBy, "undoReason": merge.UndoReason,
+	}
+}
+
+func playerMergeUndoPreviewDTO(preview domain.PlayerMergeUndoPreview) map[string]any {
+	return map[string]any{"merge": playerMergeAuditDTO(preview.Merge), "sourceBefore": playerAggregateDTO(&preview.SourceBefore), "targetBefore": playerAggregateDTO(&preview.TargetBefore)}
+}
+
+func playerMergeUndoResultDTO(result domain.PlayerMergeUndoResult) map[string]any {
+	return map[string]any{"merge": playerMergeAuditDTO(result.Merge), "sourceAfter": playerAggregateDTO(&result.SourceAfter), "targetAfter": playerAggregateDTO(&result.TargetAfter), "undoneAt": result.UndoneAt}
 }
 
 func playerAggregateDTO(value *domain.PlayerAggregate) any {

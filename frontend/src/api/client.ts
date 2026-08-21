@@ -1,4 +1,4 @@
-import type { Dashboard, ManualRankingCorrectionChange, ManualRankingCorrectionListResponse, ManualRankingCorrectionPreview, ManualRankingCorrectionRevocationResponse, MergeResult, Player, RankingsResponse, TournamentPage } from './types'
+import type { Dashboard, ManualRankingCorrectionChange, ManualRankingCorrectionListResponse, ManualRankingCorrectionPreview, ManualRankingCorrectionRevocationResponse, MergeResult, Player, PlayerMergeAudit, PlayerMergeUndoPreview, PlayerMergeUndoResult, RankingsResponse, TournamentPage } from './types'
 
 export class ApiError extends Error {
   status: number
@@ -70,6 +70,15 @@ export async function previewMerge(csrf: string, sourcePlayerId: number, targetP
 }
 export async function confirmMerge(csrf: string, token: string, targetDisplayName: string) {
   return adminMutation<{ alreadyMerged: boolean; result: MergeResult }>('/api/v1/admin/players/merge/confirm', csrf, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, targetDisplayName, confirmed: true }) })
+}
+export async function listPlayerMerges() {
+  return (await request<{ items: PlayerMergeAudit[] }>('/api/v1/admin/players/merges')).items
+}
+export async function previewPlayerMergeUndo(csrf: string, mergeId: number) {
+  return adminMutation<{ token: string; preview: PlayerMergeUndoPreview }>('/api/v1/admin/players/merges/' + mergeId + '/undo/preview', csrf, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+}
+export async function confirmPlayerMergeUndo(csrf: string, mergeId: number, token: string, reason: string) {
+  return adminMutation<PlayerMergeUndoResult>('/api/v1/admin/players/merges/' + mergeId + '/undo/confirm', csrf, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, reason, confirmed: true }) })
 }
 
 export interface ManualCorrectionInput {
