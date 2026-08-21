@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -44,7 +45,7 @@ func (s *Source) SourceName() string { return SourceName }
 func (s *Source) FetchTournaments(ctx context.Context) ([]domain.Tournament, error) {
 	pending := []string{s.startURL}
 	visited := make(map[string]struct{})
-	seenIDs := make(map[string]struct{})
+	var candidates []domain.Tournament
 	var tournaments []domain.Tournament
 	for page := 0; page < 100 && len(pending) > 0; page++ {
 		current := pending[0]
@@ -61,24 +62,7 @@ func (s *Source) FetchTournaments(ctx context.Context) ([]domain.Tournament, err
 		if err != nil {
 			return nil, fmt.Errorf("parse HTML listing %s: %w", current, err)
 		}
-		for _, tournament := range parsed {
-			// The generic crawler invokes FetchStandings for every returned
-			// tournament. HTML has no separate capability probe, so keep pure
-			// Whist, unknown categories, and non-finished cards out of that sync
-			// queue. A later crawl will pick up a newly completed Monster DYP.
-			if !eligibleHTMLListingTournament(tournament) {
-				continue
-			}
-			identity := tournament.SourceID
-			if identity == "" {
-				identity = tournament.SourceKey
-			}
-			if _, exists := seenIDs[identity]; exists {
-				continue
-			}
-			seenIDs[identity] = struct{}{}
-			tournaments = append(tournaments, tournament)
-		}
+		candidates = append(candidates, parsed...)
 		for _, next := range nextURLs {
 			if _, visitedAlready := visited[next]; visitedAlready {
 				continue
@@ -95,8 +79,17 @@ func (s *Source) FetchTournaments(ctx context.Context) ([]domain.Tournament, err
 			}
 		}
 	}
-	if len(visited) >= 100 {
+	// Reaching the page budget is only an error when pagination still has
+	// queued work. Exactly 100 completed pages is valid.
+	if len(pending) > 0 {
 		return nil, fmt.Errorf("HTML pagination exceeded safety limit")
+	}
+	// Collect every pagination branch first so a duplicate ID can be resolved
+	// to its direct /standings representation before any detail probe occurs.
+	for _, tournament := range dedupeTournaments(candidates) {
+		if s.standingsPageAvailable(ctx, tournament) {
+			tournaments = append(tournaments, tournament)
+		}
 	}
 	if s.logger != nil {
 		s.logger.Info().Str("source", SourceName).Int("pages", len(visited)).Int("found", len(tournaments)).Msg("HTML listing fetched")
@@ -104,8 +97,172 @@ func (s *Source) FetchTournaments(ctx context.Context) ([]domain.Tournament, err
 	return tournaments, nil
 }
 
-func eligibleHTMLListingTournament(tournament domain.Tournament) bool {
-	return strings.EqualFold(strings.TrimSpace(tournament.Status), "finished") && normalizeEntryType(tournament.EntryType) == "monster_dyp"
+const maxStandingsProbePages = 8
+
+// standingsPageAvailable verifies the import criterion without requiring the
+// generic crawler to persist a listing-only tournament. An explicit same-
+// tournament /standings URL is sufficient even when its endpoint is currently
+// unavailable; detail pages are loaded only to discover such links. Unrelated
+// detail pages and broad result/table links are not accepted.
+func (s *Source) standingsPageAvailable(ctx context.Context, tournament domain.Tournament) bool {
+	if strings.TrimSpace(tournament.URL) == "" {
+		return false
+	}
+	// A direct same-tournament standings link is already an existence proof.
+	// The generic crawler will perform the real fetch and mark a failed sync;
+	// eligibility must not discard the tournament just because that fetch is
+	// currently unavailable.
+	if isStandingsPageURL(tournament.URL) && s.candidateBelongsToTournament(tournament.URL, tournament) {
+		return true
+	}
+	discovered := []string{tournament.URL}
+	visited := make(map[string]struct{})
+	for len(discovered) > 0 && len(visited) < maxStandingsProbePages {
+		pageURL := discovered[0]
+		discovered = discovered[1:]
+		if _, exists := visited[pageURL]; exists {
+			continue
+		}
+		visited[pageURL] = struct{}{}
+		body, resolvedURL, err := s.get(ctx, pageURL)
+		if err != nil {
+			continue
+		}
+		// The HTTP client follows redirects. Validate the final URL as well as
+		// the candidate before accepting a page, otherwise a same-host redirect
+		// could move discovery into another tournament.
+		if !s.candidateBelongsToTournament(resolvedURL, tournament) {
+			continue
+		}
+		// A direct /standings link is sufficient once it returned a successful
+		// response. This intentionally does not require rows yet: live and
+		// newly created tournaments can expose an empty standings page first.
+		if isStandingsPageURL(resolvedURL) {
+			return true
+		}
+		document, parseErr := parseStandingDocument(resolvedURL, body, s.inScope)
+		if parseErr != nil {
+			continue
+		}
+		for _, candidate := range document.CandidateURLs {
+			if !s.candidateBelongsToTournament(candidate, tournament) {
+				continue
+			}
+			// FetchStandings deliberately recognizes broader group/results/xhr
+			// endpoints. They are not sufficient for listing eligibility: only
+			// an explicit, reachable standings route qualifies a tournament.
+			if !isStandingsPageURL(candidate) {
+				continue
+			}
+			// The explicit same-tournament link is the criterion. Its endpoint
+			// may be temporarily unavailable; FetchStandings handles that error
+			// through the crawler's sync-failure state.
+			return true
+		}
+	}
+	return false
+}
+
+func isStandingsPageURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	for _, segment := range strings.Split(strings.Trim(parsed.Path, "/"), "/") {
+		segment = strings.ToLower(segment)
+		if segment == "standing" || segment == "standings" || strings.HasPrefix(segment, "standing.") || strings.HasPrefix(segment, "standings.") {
+			return true
+		}
+	}
+	for key, values := range parsed.Query() {
+		if isStandingsToken(key) {
+			return true
+		}
+		for _, value := range values {
+			if isStandingsToken(value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isStandingsToken(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value == "standing" || value == "standings"
+}
+
+// candidateBelongsToTournament prevents common listing/navigation links from
+// turning a detail crawl into a cross-tournament crawl. Kickertool uses both
+// /tournaments/{id}/... routes and /xhr/{id}/... endpoints, so accept the
+// tournament ID only immediately after one of those route contexts. In
+// particular, a matching group ID or an arbitrary path component is not
+// evidence that a candidate belongs to this tournament. Explicit tournament
+// query parameters are a fallback only for URLs without either route context.
+func (s *Source) candidateBelongsToTournament(raw string, tournament domain.Tournament) bool {
+	wanted := strings.TrimSpace(tournament.SourceID)
+	if wanted == "" {
+		return false
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || !s.inScope(parsed) {
+		return false
+	}
+	segments := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	for index, segment := range segments {
+		context := strings.ToLower(segment)
+		if context != "tournaments" && context != "xhr" {
+			continue
+		}
+		if index+1 >= len(segments) {
+			continue
+		}
+		// The first complete route context is authoritative. Do not let a
+		// nested /xhr/{id} or /tournaments/{id} context override it.
+		return sourceIDSegmentMatches(segments[index+1], wanted)
+	}
+	// No complete route context exists, so an explicit tournament-ID query
+	// parameter may identify query-only endpoints.
+	for key, values := range parsed.Query() {
+		key = strings.ToLower(strings.ReplaceAll(key, "-", "_"))
+		switch key {
+		case "tournamentid", "tournament_id", "tournament", "tid":
+			for _, value := range values {
+				if sourceIDQueryMatches(value, wanted) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func sourceIDSegmentMatches(raw, wanted string) bool {
+	decoded, err := url.PathUnescape(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return sourceIDWithOptionalFileSuffixMatches(decoded, wanted)
+}
+
+func sourceIDQueryMatches(raw, wanted string) bool {
+	decoded, err := url.QueryUnescape(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return sourceIDWithOptionalFileSuffixMatches(decoded, wanted)
+}
+
+func sourceIDWithOptionalFileSuffixMatches(value, wanted string) bool {
+	if value == wanted {
+		return true
+	}
+	for _, suffix := range []string{".json", ".html"} {
+		if strings.HasSuffix(value, suffix) && strings.TrimSuffix(value, suffix) == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Source) FetchStandings(ctx context.Context, tournament domain.Tournament) (domain.StandingSnapshot, error) {
@@ -129,11 +286,22 @@ func (s *Source) FetchStandings(ctx context.Context, tournament domain.Tournamen
 		visited[pageURL] = struct{}{}
 		body, resolvedURL, fetchErr := s.get(ctx, pageURL)
 		if fetchErr != nil {
-			if pageURL != tournament.URL {
-				requiredFailure = pageURL
-				break
+			// The initial detail/standings route is required. Any later
+			// endpoint is optional: one unavailable group or JSON variant must
+			// not discard rows already discovered from another valid endpoint.
+			if pageURL == tournament.URL {
+				return domain.StandingSnapshot{}, fmt.Errorf("fetch HTML standings %s: %w", tournament.SourceID, fetchErr)
 			}
-			return domain.StandingSnapshot{}, fmt.Errorf("fetch HTML standings %s: %w", tournament.SourceID, fetchErr)
+			continue
+		}
+		// Redirects are scope-checked by get, but must also remain within this
+		// tournament. Never parse rows or discover more endpoints from a foreign
+		// tournament reached through a same-host redirect.
+		if !s.candidateBelongsToTournament(resolvedURL, tournament) {
+			if pageURL == tournament.URL {
+				return domain.StandingSnapshot{}, fmt.Errorf("HTML standings redirected to another tournament for %s", tournament.SourceID)
+			}
+			continue
 		}
 		pagesFetched++
 		if finalURL == "" {
@@ -153,15 +321,24 @@ func (s *Source) FetchStandings(ctx context.Context, tournament domain.Tournamen
 			if key == "" {
 				key = fallbackID(tournament.SourceID, row.PlayerName, row.Rank)
 			}
+			if row.StandingID == "" {
+				row.StandingID = key
+			}
+			if row.StandingKey == "" {
+				row.StandingKey = key
+			}
 			rowsByKey[key] = row
 		}
 		for _, candidate := range document.CandidateURLs {
+			if !s.candidateBelongsToTournament(candidate, tournament) {
+				continue
+			}
 			if _, exists := visited[candidate]; !exists {
 				discovered = append(discovered, candidate)
 			}
 		}
 	}
-	if len(discovered)+pagesFetched >= maxStandingsDiscoveryPages {
+	if len(discovered) > 0 && pagesFetched >= maxStandingsDiscoveryPages && len(rowsByKey) == 0 {
 		requiredFailure = "discovery safety limit"
 	}
 	if requiredFailure != "" {
@@ -172,8 +349,9 @@ func (s *Source) FetchStandings(ctx context.Context, tournament domain.Tournamen
 	for _, row := range rowsByKey {
 		rows = append(rows, row)
 	}
-	if len(rows) == 0 || !strings.EqualFold(strings.TrimSpace(tournament.Status), "finished") || !eligibleHTMLTournament(tournament, meta) {
-		s.logStandingsDiagnostics(tournament, visited, tablesFound, len(rows), 0, "no complete finished Monster DYP standings discovered", meta, started)
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].StandingKey < rows[j].StandingKey })
+	if len(rows) == 0 {
+		s.logStandingsDiagnostics(tournament, visited, tablesFound, len(rows), 0, "no standings rows discovered", meta, started)
 		return domain.StandingSnapshot{Source: SourceName, TournamentID: tournament.SourceID, URL: finalURL, Complete: false, FetchedAt: time.Now()}, nil
 	}
 	disciplineID := "html:discipline:" + tournament.SourceID
@@ -186,7 +364,7 @@ func (s *Source) FetchStandings(ctx context.Context, tournament domain.Tournamen
 		Stages:      []domain.Stage{{SourceID: stageID, DisciplineID: disciplineID, TournamentID: tournament.SourceID, State: tournament.Status}},
 		Groups:      []domain.StandingGroup{{SourceID: groupID, StageID: stageID, DisciplineID: disciplineID, TournamentID: tournament.SourceID, Name: meta.GroupName, State: tournament.Status}},
 	}
-	for _, row := range rows {
+	prepareRow := func(row domain.TournamentStanding) (domain.TournamentStanding, bool) {
 		row.Source = SourceName
 		row.TournamentID = tournament.SourceID
 		row.DisciplineID = disciplineID
@@ -198,24 +376,106 @@ func (s *Source) FetchStandings(ctx context.Context, tournament domain.Tournamen
 			row.StandingID = fallbackID(tournament.SourceID, row.PlayerName, row.Rank)
 		}
 		row.StandingKey = row.StandingID
-		if row.PlayerName == "" || (row.PlayerID == "" && row.Team != "") {
+		return row, row.PlayerName != "" && !(row.PlayerID == "" && row.Team != "")
+	}
+	// Group standings retain repeated player rows from distinct source groups;
+	// the player-level standings list is normalized to the repository's one row
+	// per canonical player invariant.
+	canonicalRows, canonicalErr := canonicalStandingRows(rows)
+	if canonicalErr != nil {
+		s.logStandingsDiagnostics(tournament, visited, tablesFound, len(rows), 0, canonicalErr.Error(), meta, started)
+		return domain.StandingSnapshot{}, canonicalErr
+	}
+	for _, row := range rows {
+		prepared, ok := prepareRow(row)
+		if !ok {
 			continue
 		}
-		snapshot.Standings = append(snapshot.Standings, row)
 		snapshot.GroupStandings = append(snapshot.GroupStandings, domain.GroupStanding{
-			SourceID: row.StandingID, TournamentID: row.TournamentID, DisciplineID: row.DisciplineID, StageID: row.StageID, GroupID: row.Group,
-			EntryID: row.EntryID, EntryName: row.EntryName, PlayerID: row.PlayerID, PlayerName: row.PlayerName, Rank: row.Rank,
-			Result: row.Result, Preliminary: row.Preliminary, FinalResult: row.FinalResult, PointsCents: row.PointsCents,
-			PointsPerMatchCents: row.PointsPerMatchCents, CorrectedPointsPerMatchCents: row.CorrectedPointsPerMatchCents,
-			HasCorrectedValue: row.HasCorrectedValue, GamesPlayed: row.GamesPlayed, GoalDifference: row.GoalDifference, URL: row.URL,
+			SourceID: prepared.StandingID, TournamentID: prepared.TournamentID, DisciplineID: prepared.DisciplineID, StageID: prepared.StageID, GroupID: prepared.Group,
+			EntryID: prepared.EntryID, EntryName: prepared.EntryName, PlayerID: prepared.PlayerID, PlayerName: prepared.PlayerName, Rank: prepared.Rank,
+			Result: prepared.Result, Preliminary: prepared.Preliminary, FinalResult: prepared.FinalResult, PointsCents: prepared.PointsCents,
+			PointsPerMatchCents: prepared.PointsPerMatchCents, CorrectedPointsPerMatchCents: prepared.CorrectedPointsPerMatchCents,
+			HasCorrectedValue: prepared.HasCorrectedValue, GamesPlayed: prepared.GamesPlayed, GoalDifference: prepared.GoalDifference, URL: prepared.URL,
 		})
-		if row.PointsCents != nil {
+	}
+	for _, row := range canonicalRows {
+		prepared, ok := prepareRow(row)
+		if !ok {
+			continue
+		}
+		snapshot.Standings = append(snapshot.Standings, prepared)
+		if prepared.PointsCents != nil {
 			snapshot.PointsExplicit = true
 		}
 	}
 	snapshot.Complete = len(snapshot.Standings) > 0 && len(snapshot.GroupStandings) > 0
 	s.logStandingsDiagnostics(tournament, visited, tablesFound, len(rows), len(snapshot.Standings), "detail/discipline/group discovery completed", meta, started)
 	return snapshot, nil
+}
+
+func canonicalStandingRows(rows []domain.TournamentStanding) ([]domain.TournamentStanding, error) {
+	byPlayer := make(map[string]domain.TournamentStanding)
+	for _, row := range rows {
+		key := domain.PlayerKey(row.PlayerName)
+		if key == "" {
+			continue
+		}
+		current, exists := byPlayer[key]
+		if exists && current.PlayerID != "" && row.PlayerID != "" && current.PlayerID != row.PlayerID {
+			return nil, fmt.Errorf("ambiguous HTML standing identity for player %q", row.PlayerName)
+		}
+		if !exists || preferredStandingRow(row, current) {
+			byPlayer[key] = row
+		}
+	}
+	result := make([]domain.TournamentStanding, 0, len(byPlayer))
+	for _, row := range byPlayer {
+		result = append(result, row)
+	}
+	sort.SliceStable(result, func(i, j int) bool { return result[i].StandingKey < result[j].StandingKey })
+	return result, nil
+}
+
+func preferredStandingRow(candidate, current domain.TournamentStanding) bool {
+	candidateScore := standingRowQuality(candidate)
+	currentScore := standingRowQuality(current)
+	if candidateScore != currentScore {
+		return candidateScore > currentScore
+	}
+	if candidate.Rank != nil && current.Rank != nil && *candidate.Rank != *current.Rank {
+		return *candidate.Rank < *current.Rank
+	}
+	return candidate.StandingKey < current.StandingKey
+}
+
+func standingRowQuality(row domain.TournamentStanding) int {
+	score := 0
+	if row.PlayerID != "" {
+		score += 8
+	}
+	if row.EntryID != "" {
+		score += 4
+	}
+	if row.Rank != nil {
+		score++
+	}
+	if row.PointsCents != nil {
+		score++
+	}
+	if row.GamesPlayed != nil {
+		score++
+	}
+	if row.GoalDifference != nil {
+		score++
+	}
+	if row.FinalResult != nil {
+		score++
+	}
+	if row.EntryName != "" {
+		score++
+	}
+	return score
 }
 
 const maxStandingsDiscoveryPages = 48
@@ -260,10 +520,17 @@ func (s *Source) get(ctx context.Context, rawURL string) ([]byte, string, error)
 	if closeErr != nil {
 		return nil, "", closeErr
 	}
+	finalURL := parsed
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalURL = resp.Request.URL
+	}
+	if !s.inScope(finalURL) {
+		return nil, "", fmt.Errorf("HTML redirect outside configured HTML scope")
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, "", fmt.Errorf("HTML HTTP status %d", resp.StatusCode)
 	}
-	return body, parsed.String(), nil
+	return body, finalURL.String(), nil
 }
 
 func (s *Source) inScope(candidate *url.URL) bool {
@@ -291,6 +558,7 @@ func parseListing(pageURL string, body []byte, inScope func(*url.URL) bool) ([]d
 	if err != nil {
 		return nil, nil, err
 	}
+	listingTypes := listingEntryTypes(body)
 	var tournaments []domain.Tournament
 	var nextURLs []string
 	walk(root, func(node *html.Node) {
@@ -301,7 +569,11 @@ func parseListing(pageURL string, body []byte, inScope func(*url.URL) bool) ([]d
 			if href := attr(node, "href"); href != "" {
 				if resolved := resolveURL(page, href, inScope); resolved != "" {
 					if isTournamentURL(resolved) {
-						tournaments = append(tournaments, tournamentFromAnchor(node, resolved))
+						tournament := tournamentFromAnchor(node, resolved)
+						if entryType := listingTypes[tournament.SourceID]; entryType != "" {
+							tournament.EntryType = normalizeEntryType(entryType)
+						}
+						tournaments = append(tournaments, tournament)
 					}
 					if isNextLink(node, resolved) {
 						nextURLs = append(nextURLs, resolved)
@@ -321,6 +593,34 @@ func parseListing(pageURL string, body []byte, inScope func(*url.URL) bool) ([]d
 		}
 	}
 	return dedupeTournaments(tournaments), dedupeStrings(nextURLs), nil
+}
+
+// listingEntryTypes extracts the category from the small Svelte data objects
+// embedded in the current listing. Their keys are JavaScript identifiers (for
+// example _id and nameType), not valid JSON, so decoding the whole script is
+// intentionally avoided. The card's visible mode remains the fallback.
+func listingEntryTypes(body []byte) map[string]string {
+	result := make(map[string]string)
+	text := string(body)
+	patterns := []string{
+		`(?is)\{[^{}]*?(?:_id|id)\s*:\s*["']([^"']+)["'][^{}]*?(?:nameType|name_type)\s*:\s*["']([^"']+)["'][^{}]*?\}`,
+		`(?is)\{[^{}]*?(?:nameType|name_type)\s*:\s*["']([^"']+)["'][^{}]*?(?:_id|id)\s*:\s*["']([^"']+)["'][^{}]*?\}`,
+	}
+	for index, pattern := range patterns {
+		for _, match := range regexp.MustCompile(pattern).FindAllStringSubmatch(text, -1) {
+			if len(match) != 3 {
+				continue
+			}
+			id, entryType := match[1], match[2]
+			if index == 1 {
+				entryType, id = match[1], match[2]
+			}
+			if normalized := normalizeEntryType(entryType); normalized != "" && id != "" {
+				result[id] = normalized
+			}
+		}
+	}
+	return result
 }
 
 // discoverURLs covers pagination hints embedded in JSON or small scripts
@@ -684,18 +984,6 @@ type standingsMeta struct {
 	ModeEvidence      bool
 }
 
-// eligibleHTMLTournament deliberately uses the tournament category (the
-// nameType/entryType evidence), not a mode list. A Monster-DYP category may
-// expose a Whist mode alongside it and remains eligible; a Whist category is
-// never eligible by itself.
-func eligibleHTMLTournament(tournament domain.Tournament, meta standingsMeta) bool {
-	category := normalizeEntryType(meta.EntryType)
-	if category == "" {
-		category = normalizeEntryType(tournament.EntryType)
-	}
-	return meta.EntryTypeEvidence && category == "monster_dyp"
-}
-
 func parseStandings(pageURL string, body []byte) ([]domain.TournamentStanding, standingsMeta, error) {
 	root, err := html.Parse(strings.NewReader(string(body)))
 	if err != nil {
@@ -972,7 +1260,7 @@ func dedupeStrings(values []string) []string {
 }
 
 func dedupeTournaments(values []domain.Tournament) []domain.Tournament {
-	seen := make(map[string]struct{})
+	seen := make(map[string]int)
 	result := make([]domain.Tournament, 0, len(values))
 	for _, value := range values {
 		key := value.SourceID
@@ -982,10 +1270,16 @@ func dedupeTournaments(values []domain.Tournament) []domain.Tournament {
 		if key == "" {
 			continue
 		}
-		if _, ok := seen[key]; ok {
+		if index, ok := seen[key]; ok {
+			// Prefer a direct standings URL when the listing contains both a
+			// detail and a standings link for the same tournament. This keeps
+			// deduplication from discarding the only eligible representation.
+			if isStandingsPageURL(value.URL) && !isStandingsPageURL(result[index].URL) {
+				result[index] = value
+			}
 			continue
 		}
-		seen[key] = struct{}{}
+		seen[key] = len(result)
 		result = append(result, value)
 	}
 	return result

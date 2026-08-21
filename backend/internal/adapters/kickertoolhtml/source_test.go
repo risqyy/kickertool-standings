@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +68,60 @@ func TestTournamentAnchorReadsDateAndCategoryFromCardContainer(t *testing.T) {
 	}
 }
 
+func TestCurrentTournamentCardParsesEnglishDateAndModeClass(t *testing.T) {
+	root, err := html.Parse(strings.NewReader(`<a class="tournament-card" href="/fvhkickern/tournaments/current"><span class="name">Summer Cup</span><span class="date">August 17, 2026</span><span class="mode monster_dyp">Monster DYP</span></a>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var anchor *html.Node
+	walk(root, func(node *html.Node) {
+		if node.Type == html.ElementNode && node.Data == "a" {
+			anchor = node
+		}
+	})
+	tournament := tournamentFromAnchor(anchor, "https://example.test/fvhkickern/tournaments/current")
+	if tournament.Name != "Summer Cup" || tournament.EntryType != "monster_dyp" {
+		t.Fatalf("tournament=%+v", tournament)
+	}
+	if tournament.Date == nil || tournament.Date.Format("2006-01-02") != "2026-08-17" {
+		t.Fatalf("date=%v, want 2026-08-17", tournament.Date)
+	}
+}
+
+func TestCompetitionEvidenceParsesUnquotedSvelteData(t *testing.T) {
+	root, err := html.Parse(strings.NewReader(`<script>const tournament = {_id:"t1",date:new Date(1786956090000),name:"Summer Cup",modes:["monster_dyp"],nameType:"monster_dyp"};</script>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entryType, evidence, modes := competitionEvidence(root, []byte(`const tournament = {_id:"t1",date:new Date(1786956090000),name:"Summer Cup",modes:["monster_dyp"],nameType:"monster_dyp"};`))
+	if !evidence || entryType != "monster_dyp" || len(modes) != 1 || modes[0] != "monster_dyp" {
+		t.Fatalf("entryType=%q evidence=%v modes=%v", entryType, evidence, modes)
+	}
+}
+
+func TestListingSvelteNameTypeOverridesModeForMixedCompetition(t *testing.T) {
+	body := []byte(`<a class="tournament-card" href="/fvhkickern/tournaments/mixed"><span class="name">Monster + Whist</span><span class="mode whist">Whist</span></a><script>const item = {_id:"mixed",modes:["whist"],nameType:"monster_dyp"};</script>`)
+	tournaments, _, err := parseListing("https://example.test/fvhkickern", body, func(candidate *url.URL) bool {
+		return candidate.Host == "example.test" && strings.HasPrefix(candidate.Path, "/fvhkickern")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tournaments) != 1 || tournaments[0].EntryType != "monster_dyp" {
+		t.Fatalf("tournaments=%+v, want Monster-DYP category from Svelte data", tournaments)
+	}
+}
+
+func TestCanonicalStandingRowsRejectsConflictingPlayerIDs(t *testing.T) {
+	rows := []domain.TournamentStanding{
+		{StandingID: "r1", StandingKey: "r1", PlayerID: "p1", PlayerName: "Same Name"},
+		{StandingID: "r2", StandingKey: "r2", PlayerID: "p2", PlayerName: "same name"},
+	}
+	if _, err := canonicalStandingRows(rows); err == nil {
+		t.Fatal("expected conflicting player IDs with one PlayerKey to be rejected")
+	}
+}
+
 func TestTournamentAnchorReadsTypeFromLiveSvelteModeMarkup(t *testing.T) {
 	root, err := html.Parse(strings.NewReader(`<div class="tournament-list-group svelte-8ynhhq"><a href="./fvhkickern/tournaments/t2/standings" class="svelte-8ynhhq"><div class="tournament-card svelte-u3plg"><h3><span class="title">19.08.2025</span><span class="date">August 19, 2025</span></h3><div class="modes"><span class="mode monster_dyp"><span class="mode-text">MonsterDYP</span></span></div></div></a></div>`))
 	if err != nil {
@@ -78,8 +134,8 @@ func TestTournamentAnchorReadsTypeFromLiveSvelteModeMarkup(t *testing.T) {
 		}
 	})
 	tournament := tournamentFromAnchor(anchor, "https://live.example.test/fvhkickern/tournaments/t2/standings")
-	if tournament.EntryType != "monster_dyp" || !eligibleHTMLListingTournament(tournament) {
-		t.Fatalf("tournament=%+v, want eligible Monster DYP", tournament)
+	if tournament.EntryType != "monster_dyp" {
+		t.Fatalf("tournament=%+v, want Monster DYP type", tournament)
 	}
 }
 
@@ -95,7 +151,7 @@ func TestTournamentAnchorExplicitCategoryWinsOverModeFallback(t *testing.T) {
 		}
 	})
 	tournament := tournamentFromAnchor(anchor, "https://example.test/community/tournaments/t3")
-	if tournament.EntryType != "whist" || eligibleHTMLListingTournament(tournament) {
+	if tournament.EntryType != "whist" {
 		t.Fatalf("tournament=%+v, want explicit Whist category to remain authoritative", tournament)
 	}
 }
@@ -152,7 +208,13 @@ func TestSourceDiscoversRelativePaginationAndStandingsWithoutAuthorization(t *te
 		case "/community":
 			_, _ = w.Write([]byte(`<a data-name-type="Monster DYP" href="/community/tournaments/t1">Example Cup One finished</a><a href="https://foreign.test/tournaments/no">foreign</a><script>const nextUrl = "/community?page=2";</script>`))
 		case "/community/tournaments/t1":
-			_, _ = w.Write([]byte(`<h1>Example Cup One</h1><div class="discipline-type">Monster DYP</div><table><tr><th>#</th><th>Player</th><th>Points</th><th>Matches</th><th>Tor-Diff</th></tr><tr data-standing-id="r1" data-player-id="p1"><td>1</td><td>Player One</td><td>1,50</td><td>2</td><td>3</td></tr></table>`))
+			_, _ = w.Write([]byte(`<h1>Example Cup One</h1><div class="discipline-type">Monster DYP</div><a href="/community/tournaments/t1/standings">Standings</a>`))
+		case "/community/tournaments/t1/standings":
+			_, _ = w.Write([]byte(`<h1>Example Cup One standings</h1><table><tr><th>#</th><th>Player</th><th>Points</th><th>Matches</th><th>Tor-Diff</th></tr><tr data-standing-id="r1" data-player-id="p1"><td>1</td><td>Player One</td><td>1,50</td><td>2</td><td>3</td></tr></table>`))
+		case "/community/tournaments/t2":
+			_, _ = w.Write([]byte(`<h1>Example Cup Two</h1><a href="/community/tournaments/t2/standings">Standings</a>`))
+		case "/community/tournaments/t2/standings":
+			_, _ = w.Write([]byte(`<h1>Example Cup Two standings</h1><table><tr><th>#</th><th>Player</th></tr><tr data-standing-id="r2" data-player-id="p2"><td>1</td><td>Player Two</td></tr></table>`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -209,13 +271,21 @@ func TestSourceFetchesAllPaginationBranchesAndNewResultsOnNextCrawl(t *testing.T
 				_, _ = w.Write([]byte(`<a data-name-type="Monster DYP" href="/community/tournaments/t1">Cup One finished</a><a data-name-type="Monster DYP" href="/community/tournaments/t4">Cup Four finished</a><a data-name-type="Whist" href="/community/tournaments/whist">Whist Cup finished</a>`))
 			}
 		case "/community/tournaments/t1":
-			_, _ = w.Write([]byte(`<h1>Cup One</h1>`))
+			_, _ = w.Write([]byte(`<h1>Cup One</h1><a href="/community/tournaments/t1/standings">Standings</a>`))
+		case "/community/tournaments/t1/standings":
+			_, _ = w.Write([]byte(`<h1>Cup One standings</h1><table><tr><th>#</th><th>Player</th></tr><tr data-standing-id="r1" data-player-id="p1"><td>1</td><td>Player One</td></tr></table>`))
 		case "/community/tournaments/t2":
-			_, _ = w.Write([]byte(`<h1>Cup Two</h1>`))
+			_, _ = w.Write([]byte(`<h1>Cup Two</h1><a href="/community/tournaments/t2/standings">Standings</a>`))
+		case "/community/tournaments/t2/standings":
+			_, _ = w.Write([]byte(`<h1>Cup Two standings</h1><table><tr><th>#</th><th>Player</th></tr><tr data-standing-id="r2" data-player-id="p2"><td>1</td><td>Player Two</td></tr></table>`))
 		case "/community/tournaments/t3":
-			_, _ = w.Write([]byte(`<h1>Cup Three</h1>`))
+			_, _ = w.Write([]byte(`<h1>Cup Three</h1><a href="/community/tournaments/t3/standings">Standings</a>`))
+		case "/community/tournaments/t3/standings":
+			_, _ = w.Write([]byte(`<h1>Cup Three standings</h1><table><tr><th>#</th><th>Player</th></tr><tr data-standing-id="r3" data-player-id="p3"><td>1</td><td>Player Three</td></tr></table>`))
 		case "/community/tournaments/t4":
-			_, _ = w.Write([]byte(`<h1>Cup Four</h1>`))
+			_, _ = w.Write([]byte(`<h1>Cup Four</h1><a href="/community/tournaments/t4/standings">Standings</a>`))
+		case "/community/tournaments/t4/standings":
+			_, _ = w.Write([]byte(`<h1>Cup Four standings</h1><table><tr><th>#</th><th>Player</th></tr><tr data-standing-id="r4" data-player-id="p4"><td>1</td><td>Player Four</td></tr></table>`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -247,17 +317,57 @@ func TestSourceFetchesAllPaginationBranchesAndNewResultsOnNextCrawl(t *testing.T
 	}
 }
 
-func TestSourceDiscoversSeparateStandingsAndDynamicJSONEndpoint(t *testing.T) {
+func TestSourceAllowsExactlyOneHundredCompletedListingPages(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := 1
+		if raw := r.URL.Query().Get("page"); raw != "" {
+			page, _ = strconv.Atoi(raw)
+		}
+		if page < 100 {
+			_, _ = w.Write([]byte(`<a class="next" href="/community?page=` + strconv.Itoa(page+1) + `">Next</a>`))
+		}
+	}))
+	defer server.Close()
+
+	source, err := NewSource(server.URL+"/community", server.Client(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tournaments, err := source.FetchTournaments(context.Background())
+	if err != nil {
+		t.Fatalf("exactly 100 completed pages should be valid: %v", err)
+	}
+	if len(tournaments) != 0 {
+		t.Fatalf("unexpected tournaments=%+v", tournaments)
+	}
+}
+
+func TestSourceDiscoversSeparateStandingsAndDynamicJSONEndpoint(t *testing.T) {
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.RequestURI())
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		switch r.URL.Path {
 		case "/community/tournaments/t3":
-			_, _ = w.Write([]byte(`<h1>Example Cup</h1><section class="discipline"><span class="entry-type">Monster DYP</span><a href="/community/tournaments/t3/groups/g1/standings">Group standings</a></section><script>fetch("/community/xhr/t3/group/g1/standings.json")</script>`))
+			_, _ = w.Write([]byte(`<h1>Example Cup</h1><section class="discipline"><span class="entry-type">Monster DYP</span><a href="/community/tournaments/t3/groups/g1/standings">Group standings</a><a href="/community/tournaments/t3/groups/missing/standings">Missing optional group</a><a href="/community/tournaments/foreign/groups/g1/standings">Foreign group</a><a href="/community/tournaments/foreign/groups/t3/standings">Foreign group ID collision</a><a href="/community/tournaments/foreign/standings?tournamentId=t3">Foreign query ID collision</a></section><script>fetch("/community/xhr/t3/group/g1/standings.json");fetch("/community/xhr/foreign/group/g1/standings.json");fetch("/community/xhr/foreign/group/t3/standings.json");fetch("/community/xhr/foreign/standings?tournamentId=t3");fetch("/community/tournaments/foreign/standings?group=t3")</script>`))
 		case "/community/tournaments/t3/groups/g1/standings":
 			_, _ = w.Write([]byte(`<div data-entry-type="monster_dyp"></div><table><tr><th>Rank</th><th>Player</th><th>Points</th><th>Matches</th></tr><tr data-standing-id="r1" data-entry-id="e1" data-player-id="p1"><td>1</td><td>Player One</td><td>2,00</td><td>4</td></tr></table>`))
 		case "/community/xhr/t3/group/g1/standings.json":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"entryType":"monster_dyp","standings":[{"id":"r2","rank":2,"entry":{"id":"e2","name":"Example Team B"},"player":{"id":"p2","name":"Player Two"},"points":1.5,"matches":3}]}`))
+			_, _ = w.Write([]byte(`{"entryType":"monster_dyp","standings":[{"id":"r2","rank":2,"entry":{"id":"e2","name":"Example Team B"},"player":{"id":"p2","name":"Player Two"},"points":1.5,"matches":3},{"id":"r3","rank":1,"entry":{"id":"e3","name":"Example Team A"},"player":{"id":"p1","name":"Player One"},"points":2.0,"matches":4}]}`))
+		case "/community/tournaments/foreign/standings":
+			if r.URL.Query().Get("tournamentId") == "t3" {
+				_, _ = w.Write([]byte(`<table><tr><th>#</th><th>Player</th></tr><tr data-standing-id="foreign-r1" data-player-id="foreign-p1"><td>1</td><td>Foreign Player</td></tr></table>`))
+				break
+			}
+			http.NotFound(w, r)
+		case "/community/xhr/foreign/standings":
+			if r.URL.Query().Get("tournamentId") == "t3" {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"entryType":"monster_dyp","standings":[{"id":"foreign-r2","rank":1,"player":{"id":"foreign-p2","name":"Foreign Query Player"},"points":9,"matches":9}]}`))
+				break
+			}
+			http.NotFound(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -272,11 +382,199 @@ func TestSourceDiscoversSeparateStandingsAndDynamicJSONEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !snapshot.Complete || len(snapshot.Standings) != 2 || len(snapshot.GroupStandings) != 2 {
+	if !snapshot.Complete || len(snapshot.Standings) != 2 || len(snapshot.GroupStandings) != 3 {
 		t.Fatalf("discovered snapshot=%+v", snapshot)
+	}
+	playerOneRows := 0
+	for _, row := range snapshot.Standings {
+		if row.PlayerKey == domain.PlayerKey("Player One") {
+			playerOneRows++
+		}
+	}
+	if playerOneRows != 1 {
+		t.Fatalf("duplicate player-level rows were not normalized: %+v", snapshot.Standings)
 	}
 	if snapshot.Standings[0].PlayerID == "" || snapshot.Standings[1].PlayerID == "" {
 		t.Fatalf("player IDs not allocated: %+v", snapshot.Standings)
+	}
+	for _, path := range requests {
+		if strings.Contains(path, "/foreign/") {
+			t.Fatalf("foreign tournament endpoint was fetched: %v", requests)
+		}
+	}
+	for _, forbidden := range []string{
+		"/community/tournaments/foreign/groups/t3/standings",
+		"/community/xhr/foreign/group/t3/standings.json",
+		"/community/tournaments/foreign/standings?group=t3",
+	} {
+		for _, path := range requests {
+			if path == forbidden {
+				t.Fatalf("candidate with colliding tournament/group ID was fetched: %v", requests)
+			}
+		}
+	}
+}
+
+func TestCandidateBelongsToTournamentUsesFirstRouteContext(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+
+	source, err := NewSource(server.URL+"/community", server.Client(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tournament := domain.Tournament{SourceID: "t3"}
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{name: "nested foreign route wins", url: server.URL + "/community/tournaments/foreign/xhr/t3/standings", want: false},
+		{name: "foreign xhr route wins", url: server.URL + "/community/xhr/foreign/t3/standings", want: false},
+		{name: "query-only standings fallback", url: server.URL + "/community/standings?tournamentId=t3", want: true},
+		{name: "generic query value is not an ID", url: server.URL + "/community/standings?group=t3", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := source.candidateBelongsToTournament(test.url, tournament); got != test.want {
+				t.Fatalf("candidateBelongsToTournament(%q)=%v, want %v", test.url, got, test.want)
+			}
+		})
+	}
+}
+
+func TestSourceImportsOnlyTournamentsWithReachableStandingsPage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		switch r.URL.Path {
+		case "/fvhkickern":
+			_, _ = w.Write([]byte(`<a class="tournament-card" href="/fvhkickern/tournaments/with"><span class="name">With Standings</span><span class="date">August 17, 2026</span><span class="mode whist">Whist</span></a><a class="tournament-card" href="/fvhkickern/tournaments/with/standings"><span class="name">With Standings</span><span class="date">August 17, 2026</span><span class="mode whist">Whist</span></a><a class="tournament-card" href="/fvhkickern/tournaments/without"><span class="name">Without Standings</span><span class="date">August 18, 2026</span><span class="mode whist">Whist</span></a><a class="tournament-card" href="/fvhkickern/tournaments/whist"><span class="name">Whist Standings</span><span class="date">August 19, 2026</span><span class="mode whist">Whist</span></a><a class="tournament-card" href="/fvhkickern/tournaments/empty"><span class="name">Empty Standings</span><span class="date">August 20, 2026</span><span class="mode monster_dyp">Monster DYP</span></a><a class="tournament-card" href="/fvhkickern/tournaments/noisy"><span class="name">Noisy Detail</span><span class="date">August 21, 2026</span><span class="mode monster_dyp">Monster DYP</span></a><a class="tournament-card" href="/fvhkickern/tournaments/redirect"><span class="name">Redirect Standings</span><span class="date">August 22, 2026</span><span class="mode monster_dyp">Monster DYP</span></a><a class="tournament-card" href="/fvhkickern/tournaments/redirect-foreign"><span class="name">Foreign Redirect</span><span class="date">August 23, 2026</span><span class="mode monster_dyp">Monster DYP</span></a><script>const listing = {_id:"with",modes:["whist"],nameType:"monster_dyp"};</script>`))
+		case "/fvhkickern/tournaments/with":
+			_, _ = w.Write([]byte(`<h1>With Standings</h1><nav><a href="/fvhkickern/tournaments/with/standings">Standings</a></nav>`))
+		case "/fvhkickern/tournaments/with/standings":
+			_, _ = w.Write([]byte(`<h1>With Standings</h1><div data-name-type="Whist"></div><table><tr><th>#</th><th>Player</th></tr><tr data-standing-id="r1" data-player-id="p1"><td>1</td><td>Player One</td></tr></table>`))
+		case "/fvhkickern/tournaments/without":
+			_, _ = w.Write([]byte(`<h1>Without Standings</h1><a href="/fvhkickern/tournaments/foreign/standings?tournamentId=without">Foreign query ID collision</a><table><tr><th>#</th><th>Player</th></tr><tr><td>1</td><td>Not a standings page</td></tr></table>`))
+		case "/fvhkickern/tournaments/whist":
+			_, _ = w.Write([]byte(`<h1>Whist Standings</h1><nav><a href="/fvhkickern/tournaments/whist/standings">Standings</a></nav>`))
+		case "/fvhkickern/tournaments/whist/standings":
+			_, _ = w.Write([]byte(`<h1>Whist Standings</h1><table><tr><th>#</th><th>Player</th></tr><tr data-standing-id="r2" data-player-id="p2"><td>1</td><td>Whist Player</td></tr></table>`))
+		case "/fvhkickern/tournaments/empty":
+			_, _ = w.Write([]byte(`<h1>Empty Standings</h1><nav><a href="/fvhkickern/tournaments/empty/standings">Standings</a></nav>`))
+		case "/fvhkickern/tournaments/empty/standings":
+			_, _ = w.Write([]byte(`<h1>Empty Standings</h1>`))
+		case "/fvhkickern/tournaments/noisy":
+			_, _ = w.Write([]byte(`<h1>Noisy Detail</h1><a href="/fvhkickern/tournaments/noisy/groups/final">Group</a><script>fetch("/fvhkickern/tournaments/noisy/xhr/results.json")</script>`))
+		case "/fvhkickern/tournaments/noisy/groups/final":
+			_, _ = w.Write([]byte(`<table><tr><th>#</th><th>Player</th></tr><tr><td>1</td><td>Group result</td></tr></table>`))
+		case "/fvhkickern/tournaments/noisy/xhr/results.json":
+			_, _ = w.Write([]byte(`<table><tr><th>#</th><th>Player</th></tr><tr><td>1</td><td>XHR result</td></tr></table>`))
+		case "/fvhkickern/tournaments/redirect":
+			http.Redirect(w, r, "/fvhkickern/tournaments/redirect/standings", http.StatusFound)
+		case "/fvhkickern/tournaments/redirect/standings":
+			_, _ = w.Write([]byte(`<h1>Redirect Standings</h1>`))
+		case "/fvhkickern/tournaments/redirect-foreign":
+			http.Redirect(w, r, "/fvhkickern/tournaments/foreign/standings", http.StatusFound)
+		case "/fvhkickern/tournaments/foreign/standings":
+			_, _ = w.Write([]byte(`<h1>Foreign Standings</h1><table><tr><th>#</th><th>Player</th></tr><tr data-standing-id="foreign-r1" data-player-id="foreign-p1"><td>1</td><td>Foreign Player</td></tr></table>`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	source, err := NewSource(server.URL+"/fvhkickern", server.Client(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tournaments, err := source.FetchTournaments(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tournaments) != 4 {
+		t.Fatalf("tournaments=%+v, want Monster-DYP, pure Whist, empty, and redirect standings", tournaments)
+	}
+	seen := make(map[string]domain.Tournament)
+	for _, tournament := range tournaments {
+		seen[tournament.SourceID] = tournament
+	}
+	if _, ok := seen["without"]; ok {
+		t.Fatalf("detail page without standings was imported: %+v", tournaments)
+	}
+	if _, ok := seen["with"]; !ok {
+		t.Fatalf("detail page with standings was not imported: %+v", tournaments)
+	}
+	if !strings.HasSuffix(seen["with"].URL, "/standings") {
+		t.Fatalf("duplicate tournament did not prefer direct standings URL: %+v", seen["with"])
+	}
+	if seen["with"].EntryType != "monster_dyp" {
+		t.Fatalf("listing nameType category was overwritten by mode: %+v", seen["with"])
+	}
+	snapshot, err := source.FetchStandings(context.Background(), seen["with"])
+	if err != nil || len(snapshot.Disciplines) != 1 || snapshot.Disciplines[0].EntryType != "monster_dyp" {
+		t.Fatalf("listing category was not preserved through standings snapshot: err=%v snapshot=%+v", err, snapshot)
+	}
+	for _, id := range []string{"empty", "redirect"} {
+		if _, ok := seen[id]; !ok {
+			t.Fatalf("%s standings route was not considered reachable: %+v", id, tournaments)
+		}
+	}
+	if _, ok := seen["noisy"]; ok {
+		t.Fatalf("group/results/xhr-only detail was imported: %+v", tournaments)
+	}
+	if _, ok := seen["redirect-foreign"]; ok {
+		t.Fatalf("cross-tournament redirect was imported: %+v", tournaments)
+	}
+	if whist, ok := seen["whist"]; !ok || whist.EntryType != "whist" {
+		t.Fatalf("pure Whist with standings was not preserved: %+v", tournaments)
+	}
+}
+
+func TestSourceKeepsExplicitStandingsLinksWhenEndpointFails(t *testing.T) {
+	var endpointCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		switch r.URL.Path {
+		case "/community":
+			_, _ = w.Write([]byte(`<a class="tournament-card" href="/community/tournaments/direct-failing/standings"><span class="name">Direct Failing</span><span class="date">August 24, 2026</span></a><a class="tournament-card" href="/community/tournaments/detail-failing"><span class="name">Detail Failing</span><span class="date">August 25, 2026</span></a><a class="tournament-card" href="/community/tournaments/no-link"><span class="name">No Link</span><span class="date">August 26, 2026</span></a>`))
+		case "/community/tournaments/direct-failing/standings":
+			endpointCalls++
+			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+		case "/community/tournaments/detail-failing":
+			_, _ = w.Write([]byte(`<h1>Detail Failing</h1><nav><a href="/community/tournaments/detail-failing/standings">Standings</a></nav>`))
+		case "/community/tournaments/detail-failing/standings":
+			endpointCalls++
+			http.NotFound(w, r)
+		case "/community/tournaments/no-link":
+			_, _ = w.Write([]byte(`<h1>No Link</h1><table><tr><th>#</th><th>Player</th></tr><tr><td>1</td><td>Not standings</td></tr></table>`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	source, err := NewSource(server.URL+"/community", server.Client(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tournaments, err := source.FetchTournaments(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[string]bool, len(tournaments))
+	for _, tournament := range tournaments {
+		seen[tournament.SourceID] = true
+	}
+	for _, id := range []string{"direct-failing", "detail-failing"} {
+		if !seen[id] {
+			t.Fatalf("explicit standings link was discarded after endpoint failure: %s in %+v", id, tournaments)
+		}
+	}
+	if seen["no-link"] {
+		t.Fatalf("detail page without explicit standings link was imported: %+v", tournaments)
+	}
+	if endpointCalls != 0 {
+		t.Fatalf("eligibility probe fetched failing standings endpoints; calls=%d", endpointCalls)
 	}
 }
 
@@ -315,8 +613,8 @@ func TestSourceSeparatesMonsterDYPCategoryFromWhistMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if whist.Complete || len(whist.Standings) != 0 {
-		t.Fatalf("pure Whist should not be eligible: %+v", whist)
+	if !whist.Complete || len(whist.Standings) != 1 {
+		t.Fatalf("pure Whist with a reachable standings page should be eligible: %+v", whist)
 	}
 }
 
@@ -324,6 +622,14 @@ func TestSourceKeepsIndependentOctoberSectionsAndDeduplicatesByTournamentID(t *t
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if r.URL.Path != "/community" {
+			if r.URL.Path == "/community/tournaments/october-monster" {
+				_, _ = w.Write([]byte(`<h1>Monster + Whist</h1><a href="/community/tournaments/october-monster/standings">Standings</a>`))
+				return
+			}
+			if r.URL.Path == "/community/tournaments/october-monster/standings" {
+				_, _ = w.Write([]byte(`<h1>Monster + Whist standings</h1><table><tr><th>#</th><th>Player</th></tr><tr data-standing-id="r1" data-player-id="p1"><td>1</td><td>Player One</td></tr></table>`))
+				return
+			}
 			http.NotFound(w, r)
 			return
 		}
