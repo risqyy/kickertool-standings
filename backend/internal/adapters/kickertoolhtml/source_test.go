@@ -122,6 +122,40 @@ func TestCanonicalStandingRowsRejectsConflictingPlayerIDs(t *testing.T) {
 	}
 }
 
+func TestTournamentAnchorReadsTypeFromLiveSvelteModeMarkup(t *testing.T) {
+	root, err := html.Parse(strings.NewReader(`<div class="tournament-list-group svelte-8ynhhq"><a href="./fvhkickern/tournaments/t2/standings" class="svelte-8ynhhq"><div class="tournament-card svelte-u3plg"><h3><span class="title">19.08.2025</span><span class="date">August 19, 2025</span></h3><div class="modes"><span class="mode monster_dyp"><span class="mode-text">MonsterDYP</span></span></div></div></a></div>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var anchor *html.Node
+	walk(root, func(node *html.Node) {
+		if node.Type == html.ElementNode && node.Data == "a" {
+			anchor = node
+		}
+	})
+	tournament := tournamentFromAnchor(anchor, "https://live.example.test/fvhkickern/tournaments/t2/standings")
+	if tournament.EntryType != "monster_dyp" {
+		t.Fatalf("tournament=%+v, want Monster DYP type", tournament)
+	}
+}
+
+func TestTournamentAnchorExplicitCategoryWinsOverModeFallback(t *testing.T) {
+	root, err := html.Parse(strings.NewReader(`<a data-name-type="Whist" href="/community/tournaments/t3"><span class="mode monster_dyp"><span class="mode-text">MonsterDYP</span></span><span class="status">finished</span></a>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var anchor *html.Node
+	walk(root, func(node *html.Node) {
+		if node.Type == html.ElementNode && node.Data == "a" {
+			anchor = node
+		}
+	})
+	tournament := tournamentFromAnchor(anchor, "https://example.test/community/tournaments/t3")
+	if tournament.EntryType != "whist" {
+		t.Fatalf("tournament=%+v, want explicit Whist category to remain authoritative", tournament)
+	}
+}
+
 func TestTournamentTitleDateIsNotUsedWithoutDateComponent(t *testing.T) {
 	root, err := html.Parse(strings.NewReader(`<a data-name-type="Monster DYP" href="/community/tournaments/t3"><span class="name">Cup 09.10.2025</span><span class="status">finished</span></a>`))
 	if err != nil {

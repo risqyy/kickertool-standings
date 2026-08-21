@@ -771,7 +771,8 @@ func classHasToken(class, wanted string) bool {
 // the same card, so using the complete anchor text would make a date or status
 // look like a tournament type.
 func tournamentTypeText(anchor *html.Node) string {
-	var values []string
+	var explicitValues []string
+	var modeValues []string
 	walk(anchor, func(node *html.Node) {
 		if node.Type != html.ElementNode {
 			return
@@ -779,29 +780,33 @@ func tournamentTypeText(anchor *html.Node) string {
 		classAndID := strings.ToLower(attr(node, "class") + " " + attr(node, "id"))
 		for _, key := range []string{"data-name-type", "data-nametype", "data-category", "data-entry-type", "data-entrytype", "name-type", "nametype", "name_type", "category", "entry-type", "entry_type"} {
 			if value := strings.TrimSpace(attr(node, key)); value != "" {
-				values = append(values, value)
+				explicitValues = append(explicitValues, value)
 				return
 			}
 		}
 		if strings.Contains(classAndID, "name-type") || strings.Contains(classAndID, "nametype") || strings.Contains(classAndID, "category") || strings.Contains(classAndID, "entry-type") || strings.Contains(classAndID, "discipline-type") {
 			if value := strings.TrimSpace(nodeText(node)); value != "" {
-				values = append(values, value)
+				explicitValues = append(explicitValues, value)
 			}
 		}
-		// The current Kickertool cards encode the competition as
-		// `class="mode monster_dyp"` / `class="mode whist"`.
-		if classHasToken(classAndID, "mode") {
+		// The live Svelte listing exposes the tournament type only through
+		// elements such as class="mode monster_dyp" and class="mode-text".
+		// Treat these as a fallback so an explicit category remains authoritative.
+		if classHasToken(classAndID, "mode") || classHasToken(classAndID, "mode-text") {
 			if value := strings.TrimSpace(nodeText(node)); value != "" {
-				values = append(values, value)
+				modeValues = append(modeValues, value)
 			}
 			for _, token := range strings.Fields(classAndID) {
 				if normalizeEntryType(token) != "" {
-					values = append(values, token)
+					modeValues = append(modeValues, token)
 				}
 			}
 		}
 	})
-	return strings.Join(values, " ")
+	if len(explicitValues) > 0 {
+		return strings.Join(explicitValues, " ")
+	}
+	return strings.Join(modeValues, " ")
 }
 
 func parseParticipants(text string) *int {
@@ -903,7 +908,7 @@ func parseHTMLDateValue(raw string) (*time.Time, bool) {
 			return &day, true
 		}
 	}
-	for _, layout := range []string{"2006-01-02T15:04:05.999999999", "2006-01-02T15:04:05", "2006-01-02 15:04:05", "2006-01-02 15:04", "2006-01-02", "02.01.2006", "2.1.2006", "02/01/2006", "2/1/2006", "January 2, 2006", "Jan 2, 2006"} {
+	for _, layout := range []string{"2006-01-02T15:04:05.999999999", "2006-01-02T15:04:05", "2006-01-02 15:04:05", "2006-01-02 15:04", "2006-01-02", "02.01.2006", "2.1.2006", "02/01/2006", "2/1/2006", "January 2, 2006", "Jan 2, 2006", "2 January 2006", "2 Jan 2006"} {
 		if value, err := time.ParseInLocation(layout, raw, location); err == nil {
 			if !strings.Contains(layout, "15:") {
 				value = time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, location)
