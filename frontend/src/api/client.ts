@@ -83,7 +83,7 @@ export async function confirmPlayerMergeUndo(csrf: string, mergeId: number, toke
 
 export interface ManualCorrectionInput {
 	effectiveDate: string
-	effectiveYear?: number
+	effectiveYear: number
 	tournamentCountDelta: number
 	gamesPlayedDelta: number
 	pointsCentsDelta: number

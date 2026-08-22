@@ -235,7 +235,10 @@ func (body correctionRequest) toInput(playerID uint, actor string) (domain.Manua
 	if err != nil {
 		return domain.ManualRankingCorrectionInput{}, errors.New("effectiveDate must be YYYY-MM-DD")
 	}
-	if body.EffectiveYear != nil && *body.EffectiveYear != date.Year() {
+	if body.EffectiveYear == nil || *body.EffectiveYear <= 0 {
+		return domain.ManualRankingCorrectionInput{}, errors.New("effectiveYear is required")
+	}
+	if *body.EffectiveYear != date.Year() {
 		return domain.ManualRankingCorrectionInput{}, errors.New("effectiveYear must match effectiveDate")
 	}
 	points := int64(0)
@@ -252,7 +255,7 @@ func (body correctionRequest) toInput(playerID uint, actor string) (domain.Manua
 		}
 		points = int64(math.Round(parsed * 100))
 	}
-	return domain.ManualRankingCorrectionInput{PlayerID: playerID, EffectiveDate: date, TournamentCountDelta: body.TournamentCountDelta, GamesPlayedDelta: body.GamesPlayedDelta, PointsCentsDelta: points, GoalDifferenceDelta: body.GoalDifferenceDelta, Reason: strings.TrimSpace(body.Reason), Administrator: actor, ReplaceCorrectionID: body.ReplaceCorrectionID}, nil
+	return domain.ManualRankingCorrectionInput{PlayerID: playerID, EffectiveDate: date, EffectiveYear: *body.EffectiveYear, TournamentCountDelta: body.TournamentCountDelta, GamesPlayedDelta: body.GamesPlayedDelta, PointsCentsDelta: points, GoalDifferenceDelta: body.GoalDifferenceDelta, Reason: strings.TrimSpace(body.Reason), Administrator: actor, ReplaceCorrectionID: body.ReplaceCorrectionID}, nil
 }
 
 func (h *AdminAPIHandler) correctionError(w http.ResponseWriter, err error) {
