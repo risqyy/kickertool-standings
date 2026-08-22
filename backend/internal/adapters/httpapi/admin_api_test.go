@@ -288,7 +288,27 @@ func TestManualCorrectionPreviewAndConfirmUseExistingAdminBoundary(t *testing.T)
 	if invalidDateResponse.Code != http.StatusBadRequest {
 		t.Fatalf("non-date effectiveDate status=%d body=%s", invalidDateResponse.Code, invalidDateResponse.Body.String())
 	}
-	preview := httptest.NewRequest(http.MethodPost, "/api/admin/players/1/corrections/preview", strings.NewReader(`{"effectiveDate":"2026-01-01","tournamentCountDelta":1,"reason":"test"}`))
+	missingYear := httptest.NewRequest(http.MethodPost, "/api/admin/players/1/corrections/preview", strings.NewReader(`{"effectiveDate":"2026-01-01","tournamentCountDelta":1,"reason":"test"}`))
+	missingYear.SetBasicAuth("example-admin", "example-password")
+	missingYear.Header.Set("Content-Type", "application/json")
+	missingYear.Header.Set("X-CSRF-Token", cookie.Value)
+	missingYear.AddCookie(cookie)
+	missingYearResponse := httptest.NewRecorder()
+	handler.ServeHTTP(missingYearResponse, missingYear)
+	if missingYearResponse.Code != http.StatusBadRequest || !strings.Contains(missingYearResponse.Body.String(), "effectiveYear is required") {
+		t.Fatalf("missing effectiveYear status=%d body=%s", missingYearResponse.Code, missingYearResponse.Body.String())
+	}
+	mismatchedYear := httptest.NewRequest(http.MethodPost, "/api/admin/players/1/corrections/preview", strings.NewReader(`{"effectiveDate":"2026-01-01","effectiveYear":2025,"tournamentCountDelta":1,"reason":"test"}`))
+	mismatchedYear.SetBasicAuth("example-admin", "example-password")
+	mismatchedYear.Header.Set("Content-Type", "application/json")
+	mismatchedYear.Header.Set("X-CSRF-Token", cookie.Value)
+	mismatchedYear.AddCookie(cookie)
+	mismatchedYearResponse := httptest.NewRecorder()
+	handler.ServeHTTP(mismatchedYearResponse, mismatchedYear)
+	if mismatchedYearResponse.Code != http.StatusBadRequest || !strings.Contains(mismatchedYearResponse.Body.String(), "effectiveYear must match effectiveDate") {
+		t.Fatalf("mismatched effectiveYear status=%d body=%s", mismatchedYearResponse.Code, mismatchedYearResponse.Body.String())
+	}
+	preview := httptest.NewRequest(http.MethodPost, "/api/admin/players/1/corrections/preview", strings.NewReader(`{"effectiveDate":"2026-01-01","effectiveYear":2026,"tournamentCountDelta":1,"reason":"test"}`))
 	preview.SetBasicAuth("example-admin", "example-password")
 	preview.Header.Set("Content-Type", "application/json")
 	preview.Header.Set("X-CSRF-Token", cookie.Value)

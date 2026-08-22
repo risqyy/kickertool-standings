@@ -30,8 +30,12 @@ type ManualRankingCorrection struct {
 }
 
 type ManualRankingCorrectionInput struct {
-	PlayerID             uint
-	EffectiveDate        time.Time
+	PlayerID      uint
+	EffectiveDate time.Time
+	// EffectiveYear is the explicit calendar-year scope of the correction.
+	// HTTP callers must provide it; repository callers from older integrations
+	// may leave it zero and are normalized from EffectiveDate for compatibility.
+	EffectiveYear        int
 	TournamentCountDelta int
 	GamesPlayedDelta     int
 	PointsCentsDelta     int64

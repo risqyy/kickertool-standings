@@ -285,6 +285,7 @@ type ManualRankingCorrectionRevisionModel struct {
 	Revision             int64     `gorm:"not null"`
 	Action               string    `gorm:"not null"`
 	EffectiveDate        time.Time `gorm:"not null"`
+	EffectiveYear        int       `gorm:"not null;index"`
 	TournamentCountDelta int       `gorm:"not null"`
 	GamesPlayedDelta     int       `gorm:"not null"`
 	PointsCentsDelta     int64     `gorm:"not null"`
@@ -309,6 +310,9 @@ func OpenSQLite(path string, clock ports.Clock) (*Repository, *gorm.DB, error) {
 	if err := db.AutoMigrate(&TournamentModel{}, &DisciplineModel{}, &StageModel{}, &GroupModel{}, &EntryModel{}, &PlayerModel{}, &PlayerNameAliasModel{}, &SourcePlayerIdentityModel{}, &EntryMembershipModel{}, &GroupStandingModel{}, &AllocationModel{}, &StandingModel{}, &PlayerAggregateModel{}, &PlayerMergeAuditModel{}, &TournamentInclusionAuditModel{}, &ManualRankingCorrectionModel{}, &ManualRankingCorrectionRevisionModel{}); err != nil {
 		return nil, db, fmt.Errorf("auto migrate tournaments: %w", err)
 	}
+	if err := backfillManualCorrectionYears(db); err != nil {
+		return nil, db, fmt.Errorf("backfill manual correction years: %w", err)
+	}
 	if err := ensurePlayerAliases(db); err != nil {
 		return nil, db, fmt.Errorf("ensure player aliases: %w", err)
 	}
@@ -322,6 +326,9 @@ func New(db *gorm.DB, clock ports.Clock) (*Repository, error) {
 	}
 	if err := db.AutoMigrate(&TournamentModel{}, &DisciplineModel{}, &StageModel{}, &GroupModel{}, &EntryModel{}, &PlayerModel{}, &PlayerNameAliasModel{}, &SourcePlayerIdentityModel{}, &EntryMembershipModel{}, &GroupStandingModel{}, &AllocationModel{}, &StandingModel{}, &PlayerAggregateModel{}, &PlayerMergeAuditModel{}, &TournamentInclusionAuditModel{}, &ManualRankingCorrectionModel{}, &ManualRankingCorrectionRevisionModel{}); err != nil {
 		return nil, fmt.Errorf("auto migrate tournaments: %w", err)
+	}
+	if err := backfillManualCorrectionYears(db); err != nil {
+		return nil, fmt.Errorf("backfill manual correction years: %w", err)
 	}
 	if err := ensurePlayerAliases(db); err != nil {
 		return nil, fmt.Errorf("ensure player aliases: %w", err)
@@ -488,8 +495,35 @@ func (r *Repository) ListAvailableRankingYears(ctx context.Context) ([]int, erro
 	if err := r.db.WithContext(ctx).Where("status = ? AND effective_date <= ?", manualCorrectionActive, now).Find(&corrections).Error; err != nil {
 		return nil, fmt.Errorf("list correction years: %w", err)
 	}
+	correctionYears := make(map[int]struct{})
 	for _, correction := range corrections {
-		seen[correction.EffectiveDate.In(location).Year()] = struct{}{}
+		year := correction.EffectiveYear
+		if year == 0 {
+			year = correction.EffectiveDate.In(location).Year()
+		}
+		if _, alreadyVisible := seen[year]; !alreadyVisible {
+			correctionYears[year] = struct{}{}
+		}
+	}
+	// A correction-only year is selectable only when its active corrections
+	// produce an actual ranking entry. In particular, a points-only booking
+	// with no positive tournament contribution must not manufacture a year.
+	for year := range correctionYears {
+		rows, rowsErr := r.listRankingRowsForYear(ctx, year)
+		if rowsErr != nil {
+			return nil, rowsErr
+		}
+		active, activeErr := r.activeCorrections(ctx, now, &year, nil)
+		if activeErr != nil {
+			return nil, activeErr
+		}
+		ranking, rankingErr := r.aggregateRankingRows(ctx, rows, active)
+		if rankingErr != nil {
+			return nil, rankingErr
+		}
+		if len(ranking) > 0 {
+			seen[year] = struct{}{}
+		}
 	}
 	years := make([]int, 0, len(seen))
 	for year := range seen {

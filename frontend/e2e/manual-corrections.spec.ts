@@ -1,10 +1,12 @@
 import { expect, test } from '@playwright/test'
 
 test('manual correction page supports responsive keyboard player selection', async ({ page }) => {
+  let previewPayload: Record<string, unknown> | undefined
   await page.route('**/api/v1/admin/session', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ authenticated: true, csrf_token: 'e2e-csrf' }) }))
   await page.route('**/api/v1/admin/players/search**', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [{ id: 7, displayName: 'Test Spieler', canonicalNameKey: 'test spieler', aliases: [], active: true, tournamentCount: 2, gamesPlayed: 10, totalPointsCents: 1000, pointsPerGameCents: 100, goalDifference: 3 }] }) }))
   await page.route('**/api/v1/admin/players/7/corrections', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [{ id: 9, playerId: 7, playerKey: 'test spieler', effectiveDate: '2026-08-20', effectiveYear: 2026, tournamentCountDelta: 1, gamesPlayedDelta: 1, pointsCentsDelta: 100, goalDifferenceDelta: 1, reason: 'test', administrator: 'admin', createdAt: '2026-08-20T00:00:00Z', status: 'active', revision: 1, version: 1 }], version: 0 }) }))
-  await page.route('**/api/v1/admin/players/7/corrections/preview', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ token: 'preview-token', player: { id: 7, displayName: 'Test Spieler', canonicalNameKey: 'test spieler', aliases: [], active: true, tournamentCount: 2, gamesPlayed: 10, totalPointsCents: 1000, pointsPerGameCents: 100, goalDifference: 3 }, correction: { id: 0, playerId: 7, effectiveDate: '2026-08-20', effectiveYear: 2026, tournamentCountDelta: 1, gamesPlayedDelta: 1, pointsCentsDelta: 100, goalDifferenceDelta: 1, reason: 'test', administrator: 'admin', createdAt: '2026-08-20T00:00:00Z', status: 'active', revision: 1, version: 1 }, before: { tournamentCount: 2, gamesPlayed: 10, totalPointsCents: 1000, pointsPerGameCents: 100, goalDifference: 3 }, after: { tournamentCount: 3, gamesPlayed: 11, totalPointsCents: 1100, pointsPerGameCents: 100, goalDifference: 4 }, expectedVersion: 0 }) }))
+  await page.route('**/api/v1/admin/players/7/corrections/preview', route => { previewPayload = route.request().postDataJSON() as Record<string, unknown>; return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ token: 'preview-token', player: { id: 7, displayName: 'Test Spieler', canonicalNameKey: 'test spieler', aliases: [], active: true, tournamentCount: 2, gamesPlayed: 10, totalPointsCents: 1000, pointsPerGameCents: 100, goalDifference: 3 }, correction: { id: 0, playerId: 7, effectiveDate: '2026-08-20', effectiveYear: 2026, tournamentCountDelta: 1, gamesPlayedDelta: 1, pointsCentsDelta: 100, goalDifferenceDelta: 1, reason: 'test', administrator: 'admin', createdAt: '2026-08-20T00:00:00Z', status: 'active', revision: 1, version: 1 }, before: { tournamentCount: 2, gamesPlayed: 10, totalPointsCents: 1000, pointsPerGameCents: 100, goalDifference: 3 }, after: { tournamentCount: 3, gamesPlayed: 11, totalPointsCents: 1100, pointsPerGameCents: 100, goalDifference: 4 }, expectedVersion: 0 }) }) })
+  await page.route('**/api/v1/admin/players/7/corrections/9/revoke', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ correction: {}, before: {}, after: {}, version: 1 }) }))
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/admin/players/corrections')
   await expect(page.getByRole('heading', { name: 'Manuelle Ranking-Korrekturen' })).toBeVisible()
@@ -16,7 +18,11 @@ test('manual correction page supports responsive keyboard player selection', asy
   await search.press('Enter')
   await expect(page.getByText('Ausgewählt:')).toBeVisible()
   await expect(page.getByLabel('Wirksam ab (Datum)')).toBeVisible()
+  await page.getByLabel('Wirksam ab (Datum)').fill('2026-08-20')
+  await expect(page.getByLabel('Kalenderjahr')).toHaveValue('2026')
+  await page.getByLabel('Grund').fill('Nachtrag aus Turnierprotokoll')
   await page.getByRole('button', { name: 'Vorschau erstellen' }).click()
+  await expect.poll(() => previewPayload).toMatchObject({ effectiveDate: '2026-08-20', effectiveYear: 2026 })
   await expect(page.getByRole('button', { name: 'Prüfen und bestätigen' })).toBeVisible()
   await page.getByRole('button', { name: 'Prüfen und bestätigen' }).click()
   const dialog = page.getByRole('alertdialog')
@@ -28,4 +34,14 @@ test('manual correction page supports responsive keyboard player selection', asy
   await page.keyboard.press('Escape')
   await expect(dialog).toBeHidden()
   await expect(page.getByRole('button', { name: 'Prüfen und bestätigen' })).toBeFocused()
+
+  await page.getByRole('button', { name: 'Rückgängig machen' }).click()
+  const revokeDialog = page.getByRole('alertdialog')
+  await expect(revokeDialog).toContainText('Test Spieler')
+  await expect(revokeDialog).toContainText('Kalenderjahr 2026')
+  await expect(revokeDialog).toContainText('-1')
+  await expect(page.getByLabel('Pflichtgrund für das Rückgängigmachen')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Rückgängig machen' }).last()).toBeDisabled()
+  await page.getByLabel('Pflichtgrund für das Rückgängigmachen').fill('Korrektur war falsch')
+  await expect(page.getByRole('button', { name: 'Rückgängig machen' }).last()).toBeEnabled()
 })

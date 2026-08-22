@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,103 @@ const (
 	manualCorrectionRevoked  = "revoked"
 	manualCorrectionReplaced = "replaced"
 )
+
+// backfillManualCorrectionYears upgrades databases created before the
+// explicit-year contract. EffectiveDate is the only safe source for legacy
+// rows, interpreted in the same Berlin calendar used by the public ranking.
+// Legacy hash chains are verified with their original format before they are
+// migrated exactly once. Already migrated chains are only verified, never
+// silently re-signed, so a later edit fails repository startup.
+func backfillManualCorrectionYears(db *gorm.DB) error {
+	location, err := time.LoadLocation(domain.RankingLocation)
+	if err != nil {
+		return fmt.Errorf("load ranking timezone: %w", err)
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		var corrections []ManualRankingCorrectionModel
+		if err := tx.Find(&corrections).Error; err != nil {
+			return err
+		}
+		years := make(map[uint]int, len(corrections))
+		for _, correction := range corrections {
+			year := correction.EffectiveDate.In(location).Year()
+			years[correction.ID] = year
+			if correction.EffectiveYear == 0 {
+				if err := tx.Model(&ManualRankingCorrectionModel{}).Where("id = ?", correction.ID).Update("effective_year", year).Error; err != nil {
+					return fmt.Errorf("backfill correction %d year: %w", correction.ID, err)
+				}
+			} else if correction.EffectiveYear != year {
+				return fmt.Errorf("correction %d effective year %d does not match Berlin date year %d", correction.ID, correction.EffectiveYear, year)
+			}
+		}
+		var revisions []ManualRankingCorrectionRevisionModel
+		if err := tx.Find(&revisions).Error; err != nil {
+			return err
+		}
+		correctionByID := make(map[uint]ManualRankingCorrectionModel, len(corrections))
+		for _, correction := range corrections {
+			correctionByID[correction.ID] = correction
+		}
+		byCorrection := make(map[uint][]ManualRankingCorrectionRevisionModel)
+		for _, revision := range revisions {
+			if _, ok := years[revision.CorrectionID]; !ok {
+				return fmt.Errorf("correction revision %d references missing correction %d", revision.ID, revision.CorrectionID)
+			}
+			byCorrection[revision.CorrectionID] = append(byCorrection[revision.CorrectionID], revision)
+		}
+		// Rebuild all-zero legacy chains once with the explicit year included in
+		// every digest. Mixed chains indicate a partial/corrupt migration and are
+		// rejected instead of being repaired by re-signing trusted rows.
+		for correctionID, chain := range byCorrection {
+			correction := correctionByID[correctionID]
+			sort.SliceStable(chain, func(i, j int) bool { return chain[i].Revision < chain[j].Revision })
+			legacyCount := 0
+			for _, revision := range chain {
+				if revision.EffectiveYear == 0 {
+					legacyCount++
+				}
+			}
+			if legacyCount != 0 && legacyCount != len(chain) {
+				return fmt.Errorf("correction %d has a partially migrated revision chain", correctionID)
+			}
+			previousStoredHash := ""
+			previousMigratedHash := ""
+			for _, revision := range chain {
+				hashReason := revision.Reason
+				if revision.Action == "created" {
+					hashReason = ""
+				}
+				if revision.PreviousHash != previousStoredHash {
+					return fmt.Errorf("correction %d revision %d has an invalid previous hash", correctionID, revision.Revision)
+				}
+				if legacyCount == len(chain) {
+					expectedLegacyHash := hashLegacyCorrectionRevision(correction.ID, revision.Revision, revision.Action, revision.EffectiveDate, revision.TournamentCountDelta, revision.GamesPlayedDelta, revision.PointsCentsDelta, revision.GoalDifferenceDelta, correction.Reason, revision.Administrator, hashReason, revision.OccurredAt, previousStoredHash)
+					if revision.Hash != expectedLegacyHash {
+						return fmt.Errorf("correction %d revision %d has an invalid legacy hash", correctionID, revision.Revision)
+					}
+					year := years[correctionID]
+					newHash := hashCorrectionRevision(correction.ID, revision.Revision, revision.Action, revision.EffectiveDate, year, revision.TournamentCountDelta, revision.GamesPlayedDelta, revision.PointsCentsDelta, revision.GoalDifferenceDelta, correction.Reason, revision.Administrator, hashReason, revision.OccurredAt, previousMigratedHash)
+					if err := tx.Model(&ManualRankingCorrectionRevisionModel{}).Where("id = ? AND effective_year = 0", revision.ID).Updates(map[string]any{"effective_year": year, "previous_hash": previousMigratedHash, "hash": newHash}).Error; err != nil {
+						return fmt.Errorf("backfill correction revision %d: %w", revision.ID, err)
+					}
+					previousStoredHash = revision.Hash
+					previousMigratedHash = newHash
+					continue
+				}
+				year := years[correctionID]
+				if revision.EffectiveYear != year || revision.EffectiveDate.In(location).Year() != year {
+					return fmt.Errorf("correction %d revision %d has an inconsistent effective year", correctionID, revision.Revision)
+				}
+				expectedHash := hashCorrectionRevision(correction.ID, revision.Revision, revision.Action, revision.EffectiveDate, revision.EffectiveYear, revision.TournamentCountDelta, revision.GamesPlayedDelta, revision.PointsCentsDelta, revision.GoalDifferenceDelta, correction.Reason, revision.Administrator, hashReason, revision.OccurredAt, previousStoredHash)
+				if revision.Hash != expectedHash {
+					return fmt.Errorf("correction %d revision %d has an invalid hash", correctionID, revision.Revision)
+				}
+				previousStoredHash = revision.Hash
+			}
+		}
+		return nil
+	})
+}
 
 func (r *Repository) PreviewManualRankingCorrection(ctx context.Context, input domain.ManualRankingCorrectionInput) (domain.ManualRankingCorrectionPreview, error) {
 	input.Administrator = strings.TrimSpace(input.Administrator)
@@ -506,6 +604,18 @@ func validateManualCorrectionInput(input domain.ManualRankingCorrectionInput) er
 	if input.PlayerID == 0 || input.EffectiveDate.IsZero() {
 		return errors.New("player and effective date are required")
 	}
+	location, err := time.LoadLocation(domain.RankingLocation)
+	if err != nil {
+		return fmt.Errorf("ranking timezone unavailable: %w", err)
+	}
+	dateYear := input.EffectiveDate.In(location).Year()
+	// EffectiveYear was added after the original repository API. Keep direct
+	// callers source-compatible by deriving a zero value, while rejecting every
+	// explicitly supplied mismatch. The HTTP adapter requires a non-zero field
+	// before constructing this input.
+	if input.EffectiveYear != 0 && input.EffectiveYear != dateYear {
+		return errors.New("effectiveYear must match effectiveDate")
+	}
 	if input.TournamentCountDelta == 0 && input.GamesPlayedDelta == 0 && input.PointsCentsDelta == 0 && input.GoalDifferenceDelta == 0 {
 		return errors.New("at least one correction delta is required")
 	}
@@ -539,14 +649,21 @@ func validateCorrectionResult(value domain.PlayerAggregate) error {
 func correctionFromInput(input domain.ManualRankingCorrectionInput, player PlayerModel) domain.ManualRankingCorrection {
 	location, _ := time.LoadLocation(domain.RankingLocation)
 	date := input.EffectiveDate
+	year := input.EffectiveYear
 	if location != nil {
 		// Effective dates are calendar dates, not arbitrary instants. Normalize
 		// direct repository callers to the start of that date in Berlin so the
 		// same cutoff semantics apply as for the HTTP YYYY-MM-DD parser.
 		local := date.In(location)
 		date = time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, location)
+		if year == 0 {
+			year = local.Year()
+		}
 	}
-	return domain.ManualRankingCorrection{PlayerID: player.ID, PlayerKey: player.CanonicalNameKey, PlayerName: player.DisplayName, EffectiveDate: date, EffectiveYear: date.Year(), TournamentCountDelta: input.TournamentCountDelta, GamesPlayedDelta: input.GamesPlayedDelta, PointsCentsDelta: input.PointsCentsDelta, GoalDifferenceDelta: input.GoalDifferenceDelta, Reason: strings.TrimSpace(input.Reason), Administrator: strings.TrimSpace(input.Administrator), Status: manualCorrectionActive, Revision: 1, Version: 1}
+	if year == 0 {
+		year = date.Year()
+	}
+	return domain.ManualRankingCorrection{PlayerID: player.ID, PlayerKey: player.CanonicalNameKey, PlayerName: player.DisplayName, EffectiveDate: date, EffectiveYear: year, TournamentCountDelta: input.TournamentCountDelta, GamesPlayedDelta: input.GamesPlayedDelta, PointsCentsDelta: input.PointsCentsDelta, GoalDifferenceDelta: input.GoalDifferenceDelta, Reason: strings.TrimSpace(input.Reason), Administrator: strings.TrimSpace(input.Administrator), Status: manualCorrectionActive, Revision: 1, Version: 1}
 }
 
 func toManualCorrectionModel(value domain.ManualRankingCorrection) ManualRankingCorrectionModel {
@@ -564,13 +681,24 @@ func appendCorrectionRevision(tx *gorm.DB, correction ManualRankingCorrectionMod
 		return fmt.Errorf("load previous correction revision: %w", previousErr)
 	}
 	previousHash := previous.Hash
-	data := strings.Join([]string{strconv.FormatUint(uint64(correction.ID), 10), strconv.FormatInt(correction.Revision, 10), action, correction.EffectiveDate.UTC().Format(time.RFC3339Nano), strconv.Itoa(correction.TournamentCountDelta), strconv.Itoa(correction.GamesPlayedDelta), strconv.FormatInt(correction.PointsCentsDelta, 10), strconv.Itoa(correction.GoalDifferenceDelta), correction.Reason, administrator, reason, occurredAt.UTC().Format(time.RFC3339Nano), previousHash}, "|")
-	digest := sha256.Sum256([]byte(data))
-	revision := ManualRankingCorrectionRevisionModel{CorrectionID: correction.ID, Revision: correction.Revision, Action: action, EffectiveDate: correction.EffectiveDate, TournamentCountDelta: correction.TournamentCountDelta, GamesPlayedDelta: correction.GamesPlayedDelta, PointsCentsDelta: correction.PointsCentsDelta, GoalDifferenceDelta: correction.GoalDifferenceDelta, Reason: reasonOrOriginal(reason, correction.Reason), Administrator: administrator, OccurredAt: occurredAt, PreviousHash: previousHash, Hash: hex.EncodeToString(digest[:])}
+	hash := hashCorrectionRevision(correction.ID, correction.Revision, action, correction.EffectiveDate, correction.EffectiveYear, correction.TournamentCountDelta, correction.GamesPlayedDelta, correction.PointsCentsDelta, correction.GoalDifferenceDelta, correction.Reason, administrator, reason, occurredAt, previousHash)
+	revision := ManualRankingCorrectionRevisionModel{CorrectionID: correction.ID, Revision: correction.Revision, Action: action, EffectiveDate: correction.EffectiveDate, EffectiveYear: correction.EffectiveYear, TournamentCountDelta: correction.TournamentCountDelta, GamesPlayedDelta: correction.GamesPlayedDelta, PointsCentsDelta: correction.PointsCentsDelta, GoalDifferenceDelta: correction.GoalDifferenceDelta, Reason: reasonOrOriginal(reason, correction.Reason), Administrator: administrator, OccurredAt: occurredAt, PreviousHash: previousHash, Hash: hash}
 	if err := tx.Create(&revision).Error; err != nil {
 		return fmt.Errorf("write correction revision: %w", err)
 	}
 	return nil
+}
+
+func hashCorrectionRevision(correctionID uint, revision int64, action string, effectiveDate time.Time, effectiveYear, tournamentCountDelta, gamesPlayedDelta int, pointsCentsDelta int64, goalDifferenceDelta int, correctionReason, administrator, reason string, occurredAt time.Time, previousHash string) string {
+	data := strings.Join([]string{strconv.FormatUint(uint64(correctionID), 10), strconv.FormatInt(revision, 10), action, effectiveDate.UTC().Format(time.RFC3339Nano), strconv.Itoa(effectiveYear), strconv.Itoa(tournamentCountDelta), strconv.Itoa(gamesPlayedDelta), strconv.FormatInt(pointsCentsDelta, 10), strconv.Itoa(goalDifferenceDelta), correctionReason, administrator, reason, occurredAt.UTC().Format(time.RFC3339Nano), previousHash}, "|")
+	digest := sha256.Sum256([]byte(data))
+	return hex.EncodeToString(digest[:])
+}
+
+func hashLegacyCorrectionRevision(correctionID uint, revision int64, action string, effectiveDate time.Time, tournamentCountDelta, gamesPlayedDelta int, pointsCentsDelta int64, goalDifferenceDelta int, correctionReason, administrator, reason string, occurredAt time.Time, previousHash string) string {
+	data := strings.Join([]string{strconv.FormatUint(uint64(correctionID), 10), strconv.FormatInt(revision, 10), action, effectiveDate.UTC().Format(time.RFC3339Nano), strconv.Itoa(tournamentCountDelta), strconv.Itoa(gamesPlayedDelta), strconv.FormatInt(pointsCentsDelta, 10), strconv.Itoa(goalDifferenceDelta), correctionReason, administrator, reason, occurredAt.UTC().Format(time.RFC3339Nano), previousHash}, "|")
+	digest := sha256.Sum256([]byte(data))
+	return hex.EncodeToString(digest[:])
 }
 
 func reasonOrOriginal(value, fallback string) string {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"math"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -253,6 +255,15 @@ func TestManualRankingCorrectionIsAuditableAdditiveAndVersioned(t *testing.T) {
 	if err := db.Model(&ManualRankingCorrectionRevisionModel{}).Where("correction_id = ?", items[0].ID).Count(&revisions).Error; err != nil || revisions != 2 {
 		t.Fatalf("revision count=%d err=%v", revisions, err)
 	}
+	var revisionRows []ManualRankingCorrectionRevisionModel
+	if err := db.Where("correction_id = ?", items[0].ID).Order("revision ASC").Find(&revisionRows).Error; err != nil || len(revisionRows) != 2 {
+		t.Fatalf("revision rows=%+v err=%v", revisionRows, err)
+	}
+	for _, revision := range revisionRows {
+		if revision.EffectiveYear != 2026 || revision.Hash == "" {
+			t.Fatalf("revision does not bind explicit year: %+v", revision)
+		}
+	}
 }
 
 func TestManualRankingCorrectionReplaceIsLinkedAndNotDoubleCounted(t *testing.T) {
@@ -394,6 +405,191 @@ func TestManualCorrectionEffectiveDateChangesOverallYearAndProfileWithoutCrawl(t
 	}
 }
 
+func TestManualCorrectionYearScopeNeverLeaksAcrossCalendarYears(t *testing.T) {
+	clock := &mutableRepositoryClock{now: time.Date(2026, time.February, 10, 12, 0, 0, 0, time.UTC)}
+	repo, db := testRepoWithClock(t, clock)
+	ctx := context.Background()
+	date2025 := time.Date(2025, time.December, 20, 12, 0, 0, 0, time.UTC)
+	date2026 := time.Date(2026, time.January, 5, 12, 0, 0, 0, time.UTC)
+	if _, err := repo.UpsertMany(ctx, []domain.Tournament{
+		{Source: domain.KickertoolAPISource, SourceID: "scope-2025", SourceKey: "scope-2025", Name: "Scope 2025", Date: &date2025, Status: "finished", URL: "https://example.test/scope-2025"},
+		{Source: domain.KickertoolAPISource, SourceID: "scope-2026", SourceKey: "scope-2026", Name: "Scope 2026", Date: &date2026, Status: "finished", URL: "https://example.test/scope-2026"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	insert := func(tournamentID string, standings ...domain.TournamentStanding) {
+		t.Helper()
+		if _, err := repo.UpsertStandingSnapshot(ctx, domain.StandingSnapshot{Source: domain.KickertoolAPISource, TournamentID: tournamentID, Complete: true, Standings: standings}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("scope-2025", standing("scope-2025", "scope-2025-a", "scope-a", "Scope A", 20), standing("scope-2025", "scope-2025-b", "scope-b", "Scope B", 10))
+	insert("scope-2026", standing("scope-2026", "scope-2026-a", "scope-a", "Scope A", 10), standing("scope-2026", "scope-2026-b", "scope-b", "Scope B", 20))
+	var player PlayerModel
+	if err := db.Where("canonical_name_key = ?", domain.PlayerKey("Scope A")).First(&player).Error; err != nil {
+		t.Fatal(err)
+	}
+	before2025, err := repo.ListPlayerRankingForYear(ctx, 2025)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before2026, err := repo.ListPlayerRankingForYear(ctx, 2026)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeCurrent, err := repo.ListPlayerRanking(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := domain.ManualRankingCorrectionInput{PlayerID: player.ID, EffectiveDate: time.Date(2026, time.January, 10, 0, 0, 0, 0, time.UTC), EffectiveYear: 2026, TournamentCountDelta: 1, GamesPlayedDelta: 1, PointsCentsDelta: 1500, GoalDifferenceDelta: 1, Reason: "scope regression", Administrator: "operator"}
+	change, err := repo.CreateManualRankingCorrection(ctx, input, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after2025, err := repo.ListPlayerRankingForYear(ctx, 2025)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after2025, before2025) {
+		t.Fatalf("2026 correction leaked into 2025 values or order: before=%+v after=%+v", before2025, after2025)
+	}
+	after2026, err := repo.ListPlayerRankingForYear(ctx, 2026)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after2026) != len(before2026) || after2026[0].PlayerKey != domain.PlayerKey("Scope A") || after2026[0].TotalPointsCents == nil || *after2026[0].TotalPointsCents != 2500 {
+		t.Fatalf("2026 correction was not applied in selected year: before=%+v after=%+v", before2026, after2026)
+	}
+	current, err := repo.ListPlayerRanking(ctx)
+	if err != nil || len(current) != 2 || current[0].PlayerKey != domain.PlayerKey("Scope A") {
+		t.Fatalf("overall correction result=%+v err=%v", current, err)
+	}
+	items, err := repo.ListManualRankingCorrections(ctx, player.ID)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("correction history=%+v err=%v", items, err)
+	}
+	if _, err := repo.RevokeManualRankingCorrection(ctx, player.ID, items[0].ID, change.Version, "operator", "undo scope regression"); err != nil {
+		t.Fatal(err)
+	}
+	revoked2025, err := repo.ListPlayerRankingForYear(ctx, 2025)
+	if err != nil || !reflect.DeepEqual(revoked2025, before2025) {
+		t.Fatalf("2025 changed after 2026 revoke: before=%+v after=%+v err=%v", before2025, revoked2025, err)
+	}
+	revoked2026, err := repo.ListPlayerRankingForYear(ctx, 2026)
+	if err != nil || !reflect.DeepEqual(revoked2026, before2026) {
+		t.Fatalf("2026 was not restored after revoke: before=%+v after=%+v err=%v", before2026, revoked2026, err)
+	}
+	currentAfterRevoke, err := repo.ListPlayerRanking(ctx)
+	if err != nil || !reflect.DeepEqual(currentAfterRevoke, beforeCurrent) {
+		t.Fatalf("overall ranking was not restored after revoke: before=%+v after=%+v err=%v", beforeCurrent, currentAfterRevoke, err)
+	}
+}
+
+func TestCorrectionOnlyYearAppearsOnlyWhileVisibleActiveCorrectionExists(t *testing.T) {
+	clock := &mutableRepositoryClock{now: time.Date(2027, time.February, 10, 12, 0, 0, 0, time.UTC)}
+	repo, db := testRepoWithClock(t, clock)
+	ctx := context.Background()
+	date2026 := time.Date(2026, time.December, 20, 12, 0, 0, 0, time.UTC)
+	if _, err := repo.UpsertMany(ctx, []domain.Tournament{{Source: domain.KickertoolAPISource, SourceID: "correction-only-base", SourceKey: "correction-only-base", Name: "Base", Date: &date2026, Status: "finished", URL: "https://example.test/correction-only-base"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.UpsertStandingSnapshot(ctx, domain.StandingSnapshot{Source: domain.KickertoolAPISource, TournamentID: "correction-only-base", Complete: true, Standings: []domain.TournamentStanding{standing("correction-only-base", "correction-only-row", "correction-only-player", "Correction Only", 10)}}); err != nil {
+		t.Fatal(err)
+	}
+	var player PlayerModel
+	if err := db.Where("canonical_name_key = ?", domain.PlayerKey("Correction Only")).First(&player).Error; err != nil {
+		t.Fatal(err)
+	}
+	change, err := repo.CreateManualRankingCorrection(ctx, domain.ManualRankingCorrectionInput{PlayerID: player.ID, EffectiveDate: time.Date(2027, time.January, 2, 0, 0, 0, 0, time.UTC), EffectiveYear: 2027, TournamentCountDelta: 1, GamesPlayedDelta: 2, PointsCentsDelta: 300, GoalDifferenceDelta: 1, Reason: "manual-only year", Administrator: "operator"}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	years, err := repo.ListAvailableRankingYears(ctx)
+	if err != nil || len(years) != 2 || years[0] != 2027 || years[1] != 2026 {
+		t.Fatalf("correction-only year missing: years=%v err=%v", years, err)
+	}
+	ranking, err := repo.ListPlayerRankingForYear(ctx, 2027)
+	if err != nil || len(ranking) != 1 || ranking[0].TournamentCount != 1 || ranking[0].TotalPointsCents == nil || *ranking[0].TotalPointsCents != 300 {
+		t.Fatalf("correction-only ranking=%+v err=%v", ranking, err)
+	}
+	items, err := repo.ListManualRankingCorrections(ctx, player.ID)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("correction history=%+v err=%v", items, err)
+	}
+	if _, err := repo.RevokeManualRankingCorrection(ctx, player.ID, items[0].ID, change.Version, "operator", "remove manual-only year"); err != nil {
+		t.Fatal(err)
+	}
+	years, err = repo.ListAvailableRankingYears(ctx)
+	if err != nil || len(years) != 1 || years[0] != 2026 {
+		t.Fatalf("revoked correction-only year remains selectable: years=%v err=%v", years, err)
+	}
+	if _, err := repo.RevokeManualRankingCorrection(ctx, player.ID, items[0].ID, change.Version+1, "operator", "second revoke"); !errors.Is(err, ports.ErrVersionConflict) {
+		t.Fatalf("second revoke error=%v, want version conflict", err)
+	}
+}
+
+func TestManualCorrectionYearSurvivesMergeCrawlAndReaggregationWithoutDoubleCounting(t *testing.T) {
+	clock := &mutableRepositoryClock{now: time.Date(2026, time.February, 10, 12, 0, 0, 0, time.UTC)}
+	repo, db := testRepoWithClock(t, clock)
+	ctx := context.Background()
+	date2025 := time.Date(2025, time.December, 20, 12, 0, 0, 0, time.UTC)
+	date2026 := time.Date(2026, time.January, 5, 12, 0, 0, 0, time.UTC)
+	if _, err := repo.UpsertMany(ctx, []domain.Tournament{
+		{Source: domain.KickertoolAPISource, SourceID: "merge-scope-2025", SourceKey: "merge-scope-2025", Name: "Merge Scope 2025", Date: &date2025, Status: "finished", URL: "https://example.test/merge-scope-2025"},
+		{Source: domain.KickertoolAPISource, SourceID: "merge-scope-2026", SourceKey: "merge-scope-2026", Name: "Merge Scope 2026", Date: &date2026, Status: "finished", URL: "https://example.test/merge-scope-2026"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshots := []domain.StandingSnapshot{
+		{Source: domain.KickertoolAPISource, TournamentID: "merge-scope-2025", Complete: true, Standings: []domain.TournamentStanding{standing("merge-scope-2025", "merge-scope-row-2025", "merge-scope-source", "Merge Scope Source", 20)}},
+		{Source: domain.KickertoolAPISource, TournamentID: "merge-scope-2026", Complete: true, Standings: []domain.TournamentStanding{standing("merge-scope-2026", "merge-scope-row-2026", "merge-scope-source", "Merge Scope Source", 10)}},
+	}
+	for _, snapshot := range snapshots {
+		if _, err := repo.UpsertStandingSnapshot(ctx, snapshot); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var source PlayerModel
+	if err := db.Where("canonical_name_key = ?", domain.PlayerKey("Merge Scope Source")).First(&source).Error; err != nil {
+		t.Fatal(err)
+	}
+	target := PlayerModel{CanonicalNameKey: domain.PlayerKey("Merge Scope Target"), DisplayName: "Merge Scope Target", LastSeenAt: clock.now}
+	if err := db.Create(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CreateManualRankingCorrection(ctx, domain.ManualRankingCorrectionInput{PlayerID: source.ID, EffectiveDate: time.Date(2026, time.January, 10, 0, 0, 0, 0, time.UTC), EffectiveYear: 2026, TournamentCountDelta: 1, GamesPlayedDelta: 1, PointsCentsDelta: 1500, GoalDifferenceDelta: 1, Reason: "merge scope regression", Administrator: "operator"}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.MergePlayers(ctx, source.ID, target.ID, domain.PlayerMergeOptions{Actor: "operator", Reason: "merge scope test"}); err != nil {
+		t.Fatal(err)
+	}
+	assertScoped := func(stage string) {
+		t.Helper()
+		var correction ManualRankingCorrectionModel
+		if err := db.First(&correction).Error; err != nil || correction.PlayerRef != target.ID || correction.EffectiveYear != 2026 {
+			t.Fatalf("%s correction moved incorrectly: %+v err=%v", stage, correction, err)
+		}
+		ranking2025, err := repo.ListPlayerRankingForYear(ctx, 2025)
+		if err != nil || len(ranking2025) != 1 || ranking2025[0].TotalPointsCents == nil || *ranking2025[0].TotalPointsCents != 2000 {
+			t.Fatalf("%s 2025 ranking leaked/doubled correction: %+v err=%v", stage, ranking2025, err)
+		}
+		ranking2026, err := repo.ListPlayerRankingForYear(ctx, 2026)
+		if err != nil || len(ranking2026) != 1 || ranking2026[0].TotalPointsCents == nil || *ranking2026[0].TotalPointsCents != 2500 {
+			t.Fatalf("%s 2026 ranking lost/doubled correction: %+v err=%v", stage, ranking2026, err)
+		}
+	}
+	assertScoped("after merge")
+	for _, snapshot := range snapshots {
+		if _, err := repo.UpsertStandingSnapshot(ctx, snapshot); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := repo.recalculatePlayerAggregates(db, target, clock.now); err != nil {
+		t.Fatal(err)
+	}
+	assertScoped("after crawl and reaggregation")
+}
+
 func TestManualCorrectionFingerprintRejectsCrawlAndMergeBetweenPreviewConfirm(t *testing.T) {
 	repo, db := testRepo(t)
 	ctx := context.Background()
@@ -472,6 +668,80 @@ func TestManualCorrectionMigrationPreservesExistingSQLiteRows(t *testing.T) {
 	}
 	if !db.Migrator().HasTable(&ManualRankingCorrectionModel{}) || !db.Migrator().HasTable(&ManualRankingCorrectionRevisionModel{}) {
 		t.Fatal("manual correction tables were not migrated")
+	}
+}
+
+func TestManualCorrectionMigrationBackfillsYearIntoAuditRows(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:migration-correction-year?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyDate := time.Date(2026, time.January, 1, 23, 30, 0, 0, time.UTC)
+	player := PlayerModel{CanonicalNameKey: "legacy correction player", DisplayName: "Legacy Correction Player", LastSeenAt: time.Now()}
+	if err := db.AutoMigrate(&PlayerModel{}, &ManualRankingCorrectionModel{}, &ManualRankingCorrectionRevisionModel{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&player).Error; err != nil {
+		t.Fatal(err)
+	}
+	correction := ManualRankingCorrectionModel{PlayerRef: player.ID, PlayerKey: player.CanonicalNameKey, EffectiveDate: legacyDate, EffectiveYear: 0, TournamentCountDelta: 1, Reason: "legacy", Administrator: "operator", CreatedAt: legacyDate, Status: manualCorrectionRevoked, Revision: 2, Version: 2}
+	if err := db.Create(&correction).Error; err != nil {
+		t.Fatal(err)
+	}
+	legacyHash := hashLegacyCorrectionRevision(correction.ID, 1, "created", legacyDate, 1, 0, 0, 0, "legacy", "operator", "", legacyDate, "")
+	if err := db.Create(&ManualRankingCorrectionRevisionModel{CorrectionID: correction.ID, Revision: 1, Action: "created", EffectiveDate: legacyDate, EffectiveYear: 0, TournamentCountDelta: 1, Reason: "legacy", Administrator: "operator", OccurredAt: legacyDate, Hash: legacyHash}).Error; err != nil {
+		t.Fatal(err)
+	}
+	legacyRevokeAt := legacyDate.Add(time.Hour)
+	legacyRevokeHash := hashLegacyCorrectionRevision(correction.ID, 2, "revoked", legacyDate, 1, 0, 0, 0, "legacy", "operator", "legacy revoke", legacyRevokeAt, legacyHash)
+	if err := db.Create(&ManualRankingCorrectionRevisionModel{CorrectionID: correction.ID, Revision: 2, Action: "revoked", EffectiveDate: legacyDate, EffectiveYear: 0, TournamentCountDelta: 1, Reason: "legacy revoke", Administrator: "operator", OccurredAt: legacyRevokeAt, PreviousHash: legacyHash, Hash: legacyRevokeHash}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(db, &mutableRepositoryClock{now: time.Date(2026, time.January, 2, 12, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatal(err)
+	}
+	var migrated ManualRankingCorrectionModel
+	if err := db.First(&migrated, correction.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if migrated.EffectiveYear != 2026 {
+		t.Fatalf("correction year was not backfilled: %+v", migrated)
+	}
+	var revisionRows []ManualRankingCorrectionRevisionModel
+	if err := db.Where("correction_id = ?", correction.ID).Order("revision ASC").Find(&revisionRows).Error; err != nil || len(revisionRows) != 2 {
+		t.Fatal(err)
+	}
+	if revisionRows[0].EffectiveYear != 2026 || revisionRows[1].EffectiveYear != 2026 {
+		t.Fatalf("revision years were not backfilled: %+v", revisionRows)
+	}
+	migratedHashes := []string{revisionRows[0].Hash, revisionRows[1].Hash}
+	if migratedHashes[0] == legacyHash || migratedHashes[1] == legacyRevokeHash || revisionRows[1].PreviousHash != migratedHashes[0] {
+		t.Fatal("legacy audit hash was not upgraded to bind the explicit year")
+	}
+	if _, err := New(db, &mutableRepositoryClock{now: time.Date(2026, time.January, 3, 12, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatal(err)
+	}
+	var reopened []ManualRankingCorrectionRevisionModel
+	if err := db.Where("correction_id = ?", correction.ID).Order("revision ASC").Find(&reopened).Error; err != nil || len(reopened) != 2 {
+		t.Fatal(err)
+	}
+	if reopened[0].Hash != migratedHashes[0] || reopened[1].Hash != migratedHashes[1] {
+		t.Fatalf("repository restart silently re-signed audit hashes: before=%v after=%+v", migratedHashes, reopened)
+	}
+	if err := db.Model(&ManualRankingCorrectionModel{}).Where("id = ?", correction.ID).Update("effective_year", 2025).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(db, &mutableRepositoryClock{now: time.Date(2026, time.January, 4, 12, 0, 0, 0, time.UTC)}); err == nil || !strings.Contains(err.Error(), "does not match Berlin date year") {
+		t.Fatalf("tampered correction year did not fail closed: %v", err)
+	}
+	if err := db.Model(&ManualRankingCorrectionModel{}).Where("id = ?", correction.ID).Update("effective_year", 2026).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&ManualRankingCorrectionRevisionModel{}).Where("id = ?", reopened[1].ID).Update("hash", "tampered").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(db, &mutableRepositoryClock{now: time.Date(2026, time.January, 5, 12, 0, 0, 0, time.UTC)}); err == nil || !strings.Contains(err.Error(), "invalid hash") {
+		t.Fatalf("tampered audit chain did not fail closed: %v", err)
 	}
 }
 
