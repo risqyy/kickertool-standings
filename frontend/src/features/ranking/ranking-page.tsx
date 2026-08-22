@@ -67,7 +67,7 @@ function compare(a: RankingRow, b: RankingRow, key: SortKey) {
 }
 
 function periodLabel(period: RankingPeriod) {
-  return period === null ? 'Gesamtrangliste' : `Jahresrangliste ${period}`
+  return period === null ? 'Ewigen Tabelle' : `Jahresrangliste ${period}`
 }
 
 function formatWholePoints(value: string | null | undefined) {

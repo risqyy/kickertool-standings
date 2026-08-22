@@ -97,7 +97,7 @@ describe('RankingPage', () => {
     render(<RankingPage />)
 
     const period = await screen.findByRole('combobox', { name: /Zeitraum/i })
-    expect(screen.getByRole('heading', { name: /Rangliste.*Gesamtrangliste/i })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /Rangliste.*Ewigen Tabelle/i })).toBeInTheDocument()
     await userEvent.selectOptions(period, '2025')
 
     expect(fetchMock).toHaveBeenLastCalledWith('/api/v1/public/rankings?year=2025', expect.anything())
