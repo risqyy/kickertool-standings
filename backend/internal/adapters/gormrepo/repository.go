@@ -54,9 +54,14 @@ type TournamentModel struct {
 }
 
 type PlayerModel struct {
-	ID                       uint   `gorm:"primaryKey"`
-	CanonicalNameKey         string `gorm:"not null;uniqueIndex:ux_player_canonical_name_key"`
-	DisplayName              string `gorm:"not null"`
+	ID               uint   `gorm:"primaryKey"`
+	CanonicalNameKey string `gorm:"not null;uniqueIndex:ux_player_canonical_name_key"`
+	DisplayName      string `gorm:"not null"`
+	// CreatedBy and Origin make manually created players auditable without
+	// introducing ranking/source rows. Existing crawler-created players keep
+	// the empty legacy values and are treated as source-origin players.
+	CreatedBy                string `gorm:"not null;default:''"`
+	Origin                   string `gorm:"not null;default:''"`
 	MergedIntoPlayerID       *uint  `gorm:"index"`
 	MergedAt                 *time.Time
 	LastSeenAt               time.Time `gorm:"not null"`

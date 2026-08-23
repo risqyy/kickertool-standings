@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { confirmManualCorrection, listManualCorrections, previewManualCorrection, revokeManualCorrection, searchPlayers } from '@/api/client'
 import type { ManualRankingCorrection, ManualRankingCorrectionPreview, Player } from '@/api/types'
@@ -78,5 +79,15 @@ describe('ManualCorrectionsPage', () => {
     await user.click(screen.getAllByRole('button', { name: 'Rückgängig machen' }).at(-1)!)
     expect(await screen.findByText('Korrektur revisionssicher aufgehoben.')).toBeInTheDocument()
     expect(revokeManualCorrection).toHaveBeenCalledWith('csrf-token', 7, 9, 3, 'Fehleingabe')
+  })
+
+  it('offers player creation from an empty search result', async () => {
+    const user = userEvent.setup()
+    vi.mocked(searchPlayers).mockResolvedValue([])
+    render(<MemoryRouter><ManualCorrectionsPage /></MemoryRouter>)
+
+    await user.type(screen.getByRole('combobox', { name: 'Spieler suchen' }), 'Neue Person')
+    const createLink = await screen.findByRole('link', { name: /Spieler anlegen/ })
+    expect(createLink).toHaveAttribute('href', '/admin/players/new?name=Neue%20Person')
   })
 })

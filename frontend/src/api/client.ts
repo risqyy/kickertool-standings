@@ -1,4 +1,4 @@
-import type { Dashboard, ManualRankingCorrectionChange, ManualRankingCorrectionListResponse, ManualRankingCorrectionPreview, ManualRankingCorrectionRevocationResponse, MergeResult, Player, PlayerMergeAudit, PlayerMergeUndoPreview, PlayerMergeUndoResult, RankingsResponse, TournamentPage } from './types'
+import type { CreatePlayerResponse, Dashboard, ManualRankingCorrectionChange, ManualRankingCorrectionListResponse, ManualRankingCorrectionPreview, ManualRankingCorrectionRevocationResponse, MergeResult, Player, PlayerMergeAudit, PlayerMergeUndoPreview, PlayerMergeUndoResult, RankingsResponse, TournamentPage } from './types'
 
 export class ApiError extends Error {
   status: number
@@ -64,6 +64,19 @@ export async function setTournamentInclusion(csrf: string, id: number, included:
 export async function searchPlayers(query: string) {
   const value = await request<{ items: Player[]; message?: string }>('/api/v1/admin/players/search?' + new URLSearchParams({ q: query }))
   return value.items
+}
+
+export async function createPlayer(csrf: string, displayName: string) {
+  // Admin endpoints use the same /api/v1 prefix as the existing correction
+  // and merge mutations. The server may return { player, created } or a
+  // wrapped { data: { player, created } } object during rollout.
+  const payload = await adminMutation<CreatePlayerResponse | { data: CreatePlayerResponse }>('/api/v1/admin/players', csrf, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ displayName, confirmed: true })
+  })
+  const value = 'data' in payload ? payload.data : payload
+  return value
 }
 export async function previewMerge(csrf: string, sourcePlayerId: number, targetPlayerId: number) {
   return adminMutation<{ token: string; result: MergeResult }>('/api/v1/admin/players/merge/preview', csrf, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourcePlayerId, targetPlayerId }) })

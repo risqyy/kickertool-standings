@@ -66,6 +66,9 @@ export interface Player {
   id: number
   displayName: string
   canonicalNameKey: string
+  createdAt?: string
+  createdBy?: string
+  origin?: string
   aliases: string[]
   matchedAlias?: string
   active: boolean
@@ -76,6 +79,29 @@ export interface Player {
   pointsPerGameCents: Nullable<number>
 	goalDifference: Nullable<number>
 	rankingCorrectionVersion?: number
+}
+
+/**
+ * Contract used by the admin player creation flow.
+ *
+ * The API returns the canonical player profile so the UI can immediately
+ * continue with a correction or merge. A 409 response should carry the
+ * existing active player in `player` (or `existingPlayer`) as its payload.
+ */
+export interface CreatePlayerResponse {
+  player: Player
+  created: true
+  createdAt: string
+  administrator: string
+  origin: 'manual'
+}
+
+export interface PlayerConflictPayload {
+  error?: string
+  code?: string
+  player?: Player
+  existingPlayer?: Player
+  activePlayer?: Player
 }
 
 export interface RankingAggregate {

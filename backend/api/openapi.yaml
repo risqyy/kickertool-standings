@@ -113,6 +113,35 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+  /api/v1/admin/players:
+    post:
+      security: [{ basicAuth: [] }]
+      operationId: createManualPlayer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [displayName, confirmed]
+              properties:
+                displayName: { type: string, minLength: 2, maxLength: 120 }
+                confirmed: { type: boolean, const: true }
+      responses:
+        '201':
+          description: Manual player created without ranking/source data.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ManualPlayerCreateResponse' }
+        '400': { description: Empty, invalid, or overlong display name, or missing confirmation. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: A canonical name or alias already belongs to an active player.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ManualPlayerConflictResponse' }
+        '500': { $ref: '#/components/responses/InternalError' }
   /api/v1/admin/players/search:
     get:
       security: [{ basicAuth: [] }]
@@ -379,17 +408,41 @@ components:
         inclusionVersion: { type: integer, format: int64 }
     Player:
       type: object
-      required: [id, displayName, aliases, tournamentCount]
+      required: [id, displayName, canonicalNameKey, createdAt, createdBy, origin, aliases, active, tournamentCount, gamesPlayed, totalPointsCents, pointsPerGameCents, goalDifference, rankingCorrectionVersion]
       properties:
         id: { type: integer }
         displayName: { type: string }
         aliases: { type: array, items: { type: string } }
+        matchedAlias: { type: string }
+        active: { type: boolean }
+        mergedIntoPlayerId: { type: integer }
+        canonicalNameKey: { type: string }
+        createdAt: { type: string, format: date-time }
+        createdBy: { type: string }
+        origin: { type: string }
         tournamentCount: { type: integer }
         gamesPlayed: { type: integer, nullable: true }
         totalPointsCents: { type: integer, format: int64, nullable: true }
         pointsPerGameCents: { type: integer, format: int64, nullable: true }
         goalDifference: { type: integer, nullable: true }
         rankingCorrectionVersion: { type: integer, format: int64 }
+    ManualPlayerCreateResponse:
+      type: object
+      required: [created, player, createdAt, administrator, origin]
+      properties:
+        created: { type: boolean, const: true }
+        player: { $ref: '#/components/schemas/Player' }
+        createdAt: { type: string, format: date-time }
+        administrator: { type: string }
+        origin: { type: string, enum: [manual] }
+    ManualPlayerConflictResponse:
+      type: object
+      required: [error, code, player]
+      properties:
+        error: { type: string }
+        code: { type: string, enum: [player_exists] }
+        player: { $ref: '#/components/schemas/Player' }
+        existingPlayer: { $ref: '#/components/schemas/Player' }
     PlayerMergeAudit:
       type: object
       required: [id, sourcePlayerId, targetPlayerId, sourceDisplayName, targetDisplayName, mergedAt, transferredAliases, transferredSourceIdentities, transferredAllocations, deduplicatedAllocations, actor, reason, undoAvailable, undoUnavailableReason, undoneAt, undoneBy, undoReason]

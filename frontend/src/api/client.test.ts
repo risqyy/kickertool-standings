@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ApiError, confirmManualCorrection, confirmPlayerMergeUndo, getAdminSession, getRankings, listPlayerMerges, previewManualCorrection, previewMerge, previewPlayerMergeUndo, revokeManualCorrection } from './client'
+import { ApiError, confirmManualCorrection, confirmPlayerMergeUndo, createPlayer, getAdminSession, getRankings, listPlayerMerges, previewManualCorrection, previewMerge, previewPlayerMergeUndo, revokeManualCorrection } from './client'
 
 describe('public rankings API', () => {
   it('adds the selected year as a query parameter and keeps the overall URL unchanged', async () => {
@@ -73,6 +73,29 @@ describe('manual ranking corrections API', () => {
     expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/admin/players/corrections/confirm')
     expect(fetchMock.mock.calls[2][0]).toBe('/api/v1/admin/players/7/corrections/9/revoke')
     expect(JSON.parse((fetchMock.mock.calls[2][1] as RequestInit).body as string).reason).toBe('Aufhebung dokumentiert')
+  })
+})
+
+describe('admin player creation API', () => {
+  it('sends the explicit confirmation and returns the created player', async () => {
+    const player = { id: 42, displayName: 'Alex Müller' }
+    const payload = { created: true, player, createdAt: '2026-08-23T10:00:00Z', administrator: 'admin', origin: 'manual' }
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), { status: 201 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(createPlayer('csrf-token', 'Alex Müller')).resolves.toEqual(payload)
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/admin/players')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(new Headers(init.headers).get('X-CSRF-Token')).toBe('csrf-token')
+    expect(JSON.parse(init.body as string)).toEqual({ displayName: 'Alex Müller', confirmed: true })
+  })
+
+  it('preserves the active player payload on a duplicate conflict', async () => {
+    const player = { id: 42, displayName: 'Alex Müller' }
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: 'player already exists', code: 'player_exists', player }), { status: 409 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(createPlayer('csrf-token', 'Alex Müller')).rejects.toMatchObject({ status: 409, payload: { player } })
   })
 })
 
