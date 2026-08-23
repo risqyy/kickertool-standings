@@ -18,6 +18,9 @@ type PlayerProfile struct {
 	RequestedPlayerID        uint
 	CanonicalNameKey         string
 	DisplayName              string
+	CreatedAt                time.Time
+	CreatedBy                string
+	Origin                   string
 	Aliases                  []PlayerAlias
 	MatchedAlias             string
 	Aggregate                PlayerAggregate

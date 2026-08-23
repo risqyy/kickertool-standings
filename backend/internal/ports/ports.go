@@ -78,6 +78,13 @@ type PlayerDirectory interface {
 	GetPlayerProfile(ctx context.Context, playerID uint) (domain.PlayerProfile, error)
 }
 
+// PlayerCreator is the write boundary for the protected manual player
+// creation operation. Implementations must use domain.PlayerKey for identity
+// and return the active player on an existing-name conflict.
+type PlayerCreator interface {
+	CreateManualPlayer(ctx context.Context, input domain.PlayerCreationInput) (domain.PlayerCreationResult, error)
+}
+
 // ManualRankingCorrectionRepository stores immutable correction history and
 // exposes transactional preview/confirm/revoke operations.
 type ManualRankingCorrectionRepository interface {

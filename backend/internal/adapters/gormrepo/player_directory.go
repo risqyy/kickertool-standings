@@ -153,7 +153,8 @@ func (r *Repository) profileForRoot(ctx context.Context, requestedID uint, reque
 	}
 	profile := domain.PlayerProfile{
 		ID: root.ID, RequestedPlayerID: requestedID, CanonicalNameKey: root.CanonicalNameKey,
-		DisplayName: root.DisplayName, Active: root.MergedIntoPlayerID == nil && requested.MergedIntoPlayerID == nil,
+		DisplayName: root.DisplayName, CreatedAt: root.CreatedAt, CreatedBy: root.CreatedBy, Origin: root.Origin,
+		Active:                   root.MergedIntoPlayerID == nil && requested.MergedIntoPlayerID == nil,
 		MergedIntoPlayerID:       requested.MergedIntoPlayerID,
 		RankingCorrectionVersion: root.RankingCorrectionVersion,
 		Aliases:                  make([]domain.PlayerAlias, 0, len(aliases)),

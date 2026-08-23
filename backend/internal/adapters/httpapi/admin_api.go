@@ -56,6 +56,7 @@ func AdminBasicAuth(next http.Handler, username, password string, logger *zerolo
 type AdminAPIHandler struct {
 	tournaments     ports.TournamentAdminRepository
 	directory       ports.PlayerDirectory
+	playerCreator   ports.PlayerCreator
 	merger          ports.PlayerMergeService
 	corrections     ports.ManualRankingCorrectionRepository
 	logger          *zerolog.Logger
@@ -104,12 +105,16 @@ func adminActor(ctx context.Context) string {
 
 func NewAdminAPIHandler(tournaments ports.TournamentAdminRepository, directory ports.PlayerDirectory, merger ports.PlayerMergeService, logger *zerolog.Logger, correctionRepositories ...ports.ManualRankingCorrectionRepository) *AdminAPIHandler {
 	var corrections ports.ManualRankingCorrectionRepository
+	var creator ports.PlayerCreator
 	if len(correctionRepositories) > 0 {
 		corrections = correctionRepositories[0]
 	} else if value, ok := tournaments.(ports.ManualRankingCorrectionRepository); ok {
 		corrections = value
 	}
-	return &AdminAPIHandler{tournaments: tournaments, directory: directory, merger: merger, corrections: corrections, logger: logger, plans: make(map[string]adminMergePlan), undoPlans: make(map[string]adminMergeUndoPlan), correctionPlans: make(map[string]manualCorrectionPlan)}
+	if value, ok := directory.(ports.PlayerCreator); ok {
+		creator = value
+	}
+	return &AdminAPIHandler{tournaments: tournaments, directory: directory, playerCreator: creator, merger: merger, corrections: corrections, logger: logger, plans: make(map[string]adminMergePlan), undoPlans: make(map[string]adminMergeUndoPlan), correctionPlans: make(map[string]manualCorrectionPlan)}
 }
 
 func (h *AdminAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -131,6 +136,8 @@ func (h *AdminAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.tournamentList(w, r)
 	case isMutation(r.Method) && strings.HasPrefix(r.URL.Path, "/api/admin/tournaments/") && strings.HasSuffix(r.URL.Path, "/inclusion"):
 		h.setInclusion(w, r)
+	case r.Method == http.MethodPost && (r.URL.Path == "/api/admin/players" || r.URL.Path == "/api/admin/players/create"):
+		h.playerCreate(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/admin/players/search":
 		h.playerSearch(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/admin/players/merges":
@@ -156,6 +163,57 @@ func (h *AdminAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		h.writeError(w, http.StatusNotFound, "not found")
 	}
+}
+
+func (h *AdminAPIHandler) playerCreate(w http.ResponseWriter, r *http.Request) {
+	if h.playerCreator == nil {
+		h.writeError(w, http.StatusInternalServerError, "player creation unavailable")
+		return
+	}
+	var input struct {
+		DisplayName string `json:"displayName"`
+		Confirmed   *bool  `json:"confirmed"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		h.writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if input.Confirmed == nil || !*input.Confirmed {
+		h.writeError(w, http.StatusBadRequest, "confirmation is required")
+		return
+	}
+	displayName, _, err := domain.ValidatePlayerDisplayName(input.DisplayName)
+	if err != nil {
+		if errors.Is(err, domain.ErrPlayerNameTooShort) {
+			h.writeError(w, http.StatusBadRequest, fmt.Sprintf("displayName must be at least %d characters", domain.MinPlayerDisplayNameLength))
+			return
+		}
+		if errors.Is(err, domain.ErrPlayerNameTooLong) {
+			h.writeError(w, http.StatusBadRequest, fmt.Sprintf("displayName must be at most %d characters", domain.MaxPlayerDisplayNameLength))
+			return
+		}
+		h.writeError(w, http.StatusBadRequest, "displayName must contain a valid player name")
+		return
+	}
+	result, err := h.playerCreator.CreateManualPlayer(r.Context(), domain.PlayerCreationInput{DisplayName: displayName, Administrator: adminActor(r.Context())})
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrPlayerNameTooShort):
+			h.writeError(w, http.StatusBadRequest, fmt.Sprintf("displayName must be at least %d characters", domain.MinPlayerDisplayNameLength))
+		case errors.Is(err, domain.ErrPlayerNameTooLong):
+			h.writeError(w, http.StatusBadRequest, fmt.Sprintf("displayName must be at most %d characters", domain.MaxPlayerDisplayNameLength))
+		case errors.Is(err, domain.ErrInvalidPlayerName):
+			h.writeError(w, http.StatusBadRequest, "displayName must contain a valid player name")
+		default:
+			h.writeError(w, http.StatusInternalServerError, "player creation failed")
+		}
+		return
+	}
+	if !result.Created {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "player already exists", "code": "player_exists", "player": playerDTOFrom(result.Player), "existingPlayer": playerDTOFrom(result.Player)})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"created": true, "player": playerDTOFrom(result.Player), "createdAt": result.CreatedAt, "administrator": result.Administrator, "origin": result.Origin})
 }
 
 func setAdminHeaders(w http.ResponseWriter) {
@@ -554,19 +612,22 @@ func dashboardDTO(value domain.Dashboard) dashboardDTOValue {
 }
 
 type playerDTO struct {
-	ID                       uint     `json:"id"`
-	DisplayName              string   `json:"displayName"`
-	CanonicalNameKey         string   `json:"canonicalNameKey"`
-	Aliases                  []string `json:"aliases"`
-	MatchedAlias             string   `json:"matchedAlias,omitempty"`
-	Active                   bool     `json:"active"`
-	MergedIntoPlayerID       *uint    `json:"mergedIntoPlayerId,omitempty"`
-	TournamentCount          int      `json:"tournamentCount"`
-	GamesPlayed              *int     `json:"gamesPlayed"`
-	TotalPointsCents         *int64   `json:"totalPointsCents"`
-	PointsPerGameCents       *int64   `json:"pointsPerGameCents"`
-	GoalDifference           *int     `json:"goalDifference"`
-	RankingCorrectionVersion int64    `json:"rankingCorrectionVersion"`
+	ID                       uint      `json:"id"`
+	DisplayName              string    `json:"displayName"`
+	CanonicalNameKey         string    `json:"canonicalNameKey"`
+	CreatedAt                time.Time `json:"createdAt"`
+	CreatedBy                string    `json:"createdBy"`
+	Origin                   string    `json:"origin"`
+	Aliases                  []string  `json:"aliases"`
+	MatchedAlias             string    `json:"matchedAlias,omitempty"`
+	Active                   bool      `json:"active"`
+	MergedIntoPlayerID       *uint     `json:"mergedIntoPlayerId,omitempty"`
+	TournamentCount          int       `json:"tournamentCount"`
+	GamesPlayed              *int      `json:"gamesPlayed"`
+	TotalPointsCents         *int64    `json:"totalPointsCents"`
+	PointsPerGameCents       *int64    `json:"pointsPerGameCents"`
+	GoalDifference           *int      `json:"goalDifference"`
+	RankingCorrectionVersion int64     `json:"rankingCorrectionVersion"`
 }
 
 func playerDTOFrom(profile domain.PlayerProfile) playerDTO {
@@ -574,7 +635,7 @@ func playerDTOFrom(profile domain.PlayerProfile) playerDTO {
 	for _, alias := range profile.Aliases {
 		aliases = append(aliases, alias.DisplayName)
 	}
-	return playerDTO{ID: profile.ID, DisplayName: profile.DisplayName, CanonicalNameKey: profile.CanonicalNameKey, Aliases: aliases, MatchedAlias: profile.MatchedAlias, Active: profile.Active, MergedIntoPlayerID: profile.MergedIntoPlayerID, RankingCorrectionVersion: profile.RankingCorrectionVersion, TournamentCount: profile.Aggregate.TournamentCount, GamesPlayed: profile.Aggregate.GamesPlayed, TotalPointsCents: profile.Aggregate.TotalPointsCents, PointsPerGameCents: profile.Aggregate.PointsPerGameCents, GoalDifference: profile.Aggregate.GoalDifference}
+	return playerDTO{ID: profile.ID, DisplayName: profile.DisplayName, CanonicalNameKey: profile.CanonicalNameKey, CreatedAt: profile.CreatedAt, CreatedBy: profile.CreatedBy, Origin: profile.Origin, Aliases: aliases, MatchedAlias: profile.MatchedAlias, Active: profile.Active, MergedIntoPlayerID: profile.MergedIntoPlayerID, RankingCorrectionVersion: profile.RankingCorrectionVersion, TournamentCount: profile.Aggregate.TournamentCount, GamesPlayed: profile.Aggregate.GamesPlayed, TotalPointsCents: profile.Aggregate.TotalPointsCents, PointsPerGameCents: profile.Aggregate.PointsPerGameCents, GoalDifference: profile.Aggregate.GoalDifference}
 }
 
 func mergeResultDTO(result domain.MergeResult) map[string]any {
