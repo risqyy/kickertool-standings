@@ -1003,17 +1003,33 @@ func upsertSourcePlayerIdentity(tx *gorm.DB, source, externalID, nameKey string,
 }
 
 func findStanding(tx *gorm.DB, standing domain.TournamentStanding) (StandingModel, error) {
-	var existing StandingModel
-	var err error
+	var bySourceID StandingModel
+	sourceIDErr := gorm.ErrRecordNotFound
 	if standing.StandingID != "" {
-		err = tx.Where("source = ? AND source_standing_id = ?", standing.Source, standing.StandingID).First(&existing).Error
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return existing, err
+		sourceIDErr = tx.Where("source = ? AND source_standing_id = ?", standing.Source, standing.StandingID).First(&bySourceID).Error
+		if sourceIDErr != nil && !errors.Is(sourceIDErr, gorm.ErrRecordNotFound) {
+			return StandingModel{}, sourceIDErr
 		}
-		return existing, gorm.ErrRecordNotFound
+		if sourceIDErr == nil && bySourceID.TournamentID != standing.TournamentID {
+			return StandingModel{}, fmt.Errorf("ambiguous standing identity: source standing ID belongs to another tournament")
+		}
 	}
-	err = tx.Where("source = ? AND tournament_id = ? AND player_key = ?", standing.Source, standing.TournamentID, standing.PlayerKey).First(&existing).Error
-	return existing, err
+
+	var byPlayer StandingModel
+	playerErr := tx.Where("source = ? AND tournament_id = ? AND player_key = ?", standing.Source, standing.TournamentID, standing.PlayerKey).First(&byPlayer).Error
+	if playerErr != nil && !errors.Is(playerErr, gorm.ErrRecordNotFound) {
+		return StandingModel{}, playerErr
+	}
+	if sourceIDErr == nil && playerErr == nil && bySourceID.ID != byPlayer.ID {
+		return StandingModel{}, fmt.Errorf("ambiguous standing identity: source standing ID and tournament player resolve to different rows")
+	}
+	if sourceIDErr == nil {
+		return bySourceID, nil
+	}
+	if playerErr == nil {
+		return byPlayer, nil
+	}
+	return StandingModel{}, gorm.ErrRecordNotFound
 }
 
 func (r *Repository) recalculateAggregate(tx *gorm.DB, source, playerKey string, now time.Time) error {

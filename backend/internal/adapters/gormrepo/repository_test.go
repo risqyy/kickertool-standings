@@ -206,6 +206,59 @@ func TestStandingSnapshotIdempotencyCorrectionAndDistinctIDs(t *testing.T) {
 	}
 }
 
+func TestStandingSnapshotUpdatesExistingPlayerWhenSourceStandingIDChanges(t *testing.T) {
+	repo, db := testRepo(t)
+	ctx := context.Background()
+	if _, err := repo.UpsertMany(ctx, []domain.Tournament{tournament("changed-standing-id", "Changed standing ID")}); err != nil {
+		t.Fatal(err)
+	}
+	initial := standing("changed-standing-id", "source-standing-before", "player-1", "Player One", 15)
+	if _, err := repo.UpsertStandingSnapshot(ctx, domain.StandingSnapshot{Source: initial.Source, TournamentID: initial.TournamentID, Complete: true, Standings: []domain.TournamentStanding{initial}}); err != nil {
+		t.Fatal(err)
+	}
+
+	changed := standing("changed-standing-id", "source-standing-after", "player-1", "Player One", 20)
+	result, err := repo.UpsertStandingSnapshot(ctx, domain.StandingSnapshot{Source: changed.Source, TournamentID: changed.TournamentID, Complete: true, Standings: []domain.TournamentStanding{changed}})
+	if err != nil || result.StandingsInserted != 0 || result.StandingsUpdated != 1 {
+		t.Fatalf("changed standing ID result=%+v err=%v", result, err)
+	}
+
+	var rows []StandingModel
+	if err := db.Where("source = ? AND tournament_id = ? AND player_key = ?", changed.Source, changed.TournamentID, domain.PlayerKey(changed.PlayerName)).Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].SourceStandingID == nil || *rows[0].SourceStandingID != changed.StandingID || rows[0].StandingKey != changed.StandingKey || rows[0].PointsCents == nil || *rows[0].PointsCents != 2000 {
+		t.Fatalf("standing rows after source ID change=%+v", rows)
+	}
+}
+
+func TestStandingSnapshotRejectsAmbiguousSourceAndNaturalIdentity(t *testing.T) {
+	repo, db := testRepo(t)
+	ctx := context.Background()
+	if _, err := repo.UpsertMany(ctx, []domain.Tournament{tournament("ambiguous-standing-id", "Ambiguous standing ID")}); err != nil {
+		t.Fatal(err)
+	}
+	first := standing("ambiguous-standing-id", "source-standing-1", "player-1", "Player One", 15)
+	second := standing("ambiguous-standing-id", "source-standing-2", "player-2", "Player Two", 11)
+	if _, err := repo.UpsertStandingSnapshot(ctx, domain.StandingSnapshot{Source: first.Source, TournamentID: first.TournamentID, Complete: true, Standings: []domain.TournamentStanding{first, second}}); err != nil {
+		t.Fatal(err)
+	}
+
+	ambiguous := standing("ambiguous-standing-id", second.StandingID, first.PlayerID, first.PlayerName, 20)
+	_, err := repo.UpsertStandingSnapshot(ctx, domain.StandingSnapshot{Source: ambiguous.Source, TournamentID: ambiguous.TournamentID, Complete: true, Standings: []domain.TournamentStanding{ambiguous}})
+	if err == nil || !strings.Contains(err.Error(), "ambiguous standing identity") {
+		t.Fatalf("ambiguous identity error=%v", err)
+	}
+
+	var rows []StandingModel
+	if err := db.Where("source = ? AND tournament_id = ?", first.Source, first.TournamentID).Order("standing_key ASC").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].PlayerName != first.PlayerName || rows[1].PlayerName != second.PlayerName {
+		t.Fatalf("ambiguous update changed standings=%+v", rows)
+	}
+}
+
 func TestManualRankingCorrectionIsAuditableAdditiveAndVersioned(t *testing.T) {
 	repo, db := testRepo(t)
 	ctx := context.Background()
