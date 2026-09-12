@@ -7,6 +7,10 @@ import (
 	"kickertool-ranking/internal/domain"
 )
 
+// FinalizedStandingRecheckInterval limits healthy-source correction latency while
+// avoiding a standings crawl of the entire archive every scheduler tick.
+const FinalizedStandingRecheckInterval = 24 * time.Hour
+
 type StandingSyncDecision struct {
 	ShouldSync bool
 	Reason     string
@@ -41,6 +45,9 @@ func ShouldSyncStandings(tournament domain.Tournament, now time.Time) StandingSy
 	}
 
 	if tournament.FinalizedAt != nil && tournament.StandingsSyncComplete && !tournament.LastStandingsSyncFailed {
+		if tournament.StandingsSyncedAt == nil || !now.Before(tournament.StandingsSyncedAt.Add(FinalizedStandingRecheckInterval)) {
+			return StandingSyncDecision{ShouldSync: true, Reason: "finalized_recheck_due"}
+		}
 		return StandingSyncDecision{Reason: "completed_finalized"}
 	}
 	if tournament.LastStandingsSyncFailed {

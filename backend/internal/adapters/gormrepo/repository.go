@@ -565,7 +565,6 @@ func (r *Repository) qualifiedRankingTournaments(ctx context.Context, year *int)
 	query := r.db.WithContext(ctx).
 		Where("included_in_ranking = ?", true).
 		Where("standings_sync_complete = ?", true).
-		Where("last_standings_sync_failed = ?", false).
 		Where("date IS NOT NULL")
 	if err := query.Find(&models).Error; err != nil {
 		return nil, fmt.Errorf("list ranking tournaments: %w", err)
@@ -845,10 +844,12 @@ func upsertSourceRecord(tx *gorm.DB, model any, value any, source, sourceID, key
 	return nil
 }
 
+// MarkStandingSyncFailed describes the last attempt. A previously complete
+// stored snapshot remains complete and eligible for ranking until a new complete
+// snapshot replaces it; initial failures naturally retain their false flag.
 func (r *Repository) MarkStandingSyncFailed(ctx context.Context, source, tournamentID string) error {
 	query := r.db.WithContext(ctx).Where("source = ? AND source_id = ?", source, tournamentID)
 	result := query.Model(&TournamentModel{}).Updates(map[string]any{
-		"standings_sync_complete":    false,
 		"last_standings_sync_failed": true,
 	})
 	if result.Error != nil {

@@ -49,3 +49,24 @@ func TestShouldSyncStandingsStates(t *testing.T) {
 }
 
 func timePtr(value time.Time) *time.Time { return &value }
+
+func TestFinalizedStandingRecheckBoundary(t *testing.T) {
+	now := policyTime()
+	last := now.Add(-FinalizedStandingRecheckInterval)
+	tournament := domain.Tournament{Status: "finished", StandingsSyncedAt: &last, StandingsSyncComplete: true, FinalizedAt: &last}
+	if got := ShouldSyncStandings(tournament, now.Add(-time.Nanosecond)); got.ShouldSync {
+		t.Fatalf("early recheck: %+v", got)
+	}
+	if got := ShouldSyncStandings(tournament, now); !got.ShouldSync || got.Reason != "finalized_recheck_due" {
+		t.Fatalf("due recheck: %+v", got)
+	}
+	tournament.LastStandingsSyncFailed = true
+	if got := ShouldSyncStandings(tournament, last.Add(time.Minute)); !got.ShouldSync || got.Reason != "retry_after_failure" {
+		t.Fatalf("failure retry: %+v", got)
+	}
+	tournament.LastStandingsSyncFailed = false
+	tournament.StandingsSyncedAt = nil
+	if got := ShouldSyncStandings(tournament, now); !got.ShouldSync {
+		t.Fatalf("missing success time must recheck: %+v", got)
+	}
+}

@@ -90,7 +90,6 @@ func (r *failureStateRepo) FindBySourceID(context.Context, string, string) (doma
 
 func (r *failureStateRepo) MarkStandingSyncFailed(_ context.Context, _, _ string) error {
 	r.marked = true
-	r.tournament.StandingsSyncComplete = false
 	r.tournament.LastStandingsSyncFailed = true
 	return nil
 }
@@ -160,7 +159,7 @@ func TestCrawlerMarksFailedStandingsWithoutPersistingOrAggregatingSnapshot(t *te
 	if result.TournamentsProcessed != 1 || result.TournamentsFailed != 1 || result.TournamentsSucceeded != 0 {
 		t.Fatalf("unexpected crawl result: %+v", result)
 	}
-	if !state.marked || !state.tournament.LastStandingsSyncFailed || state.tournament.StandingsSyncComplete {
+	if !state.marked || !state.tournament.LastStandingsSyncFailed || !state.tournament.StandingsSyncComplete {
 		t.Fatalf("failed standings state was not persisted: marked=%v tournament=%+v", state.marked, state.tournament)
 	}
 	if standingSource.calls != 1 || standingRepo.calls != 0 {
