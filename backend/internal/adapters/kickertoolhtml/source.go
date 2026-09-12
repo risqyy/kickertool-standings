@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +22,8 @@ import (
 )
 
 const SourceName = domain.KickertoolHTMLSource
+
+var errHTMLPageNotFound = errors.New("HTML HTTP status 404")
 
 type Source struct {
 	startURL string
@@ -87,7 +90,11 @@ func (s *Source) FetchTournaments(ctx context.Context) ([]domain.Tournament, err
 	// Collect every pagination branch first so a duplicate ID can be resolved
 	// to its direct /standings representation before any detail probe occurs.
 	for _, tournament := range dedupeTournaments(candidates) {
-		if s.standingsPageAvailable(ctx, tournament) {
+		available, err := s.standingsPageAvailable(ctx, tournament)
+		if err != nil {
+			return nil, fmt.Errorf("verify HTML tournament %s standings eligibility: %w", tournament.SourceID, err)
+		}
+		if available {
 			tournaments = append(tournaments, tournament)
 		}
 	}
@@ -104,16 +111,16 @@ const maxStandingsProbePages = 8
 // tournament /standings URL is sufficient even when its endpoint is currently
 // unavailable; detail pages are loaded only to discover such links. Unrelated
 // detail pages and broad result/table links are not accepted.
-func (s *Source) standingsPageAvailable(ctx context.Context, tournament domain.Tournament) bool {
+func (s *Source) standingsPageAvailable(ctx context.Context, tournament domain.Tournament) (bool, error) {
 	if strings.TrimSpace(tournament.URL) == "" {
-		return false
+		return false, nil
 	}
 	// A direct same-tournament standings link is already an existence proof.
 	// The generic crawler will perform the real fetch and mark a failed sync;
 	// eligibility must not discard the tournament just because that fetch is
 	// currently unavailable.
 	if isStandingsPageURL(tournament.URL) && s.candidateBelongsToTournament(tournament.URL, tournament) {
-		return true
+		return true, nil
 	}
 	discovered := []string{tournament.URL}
 	visited := make(map[string]struct{})
@@ -126,7 +133,13 @@ func (s *Source) standingsPageAvailable(ctx context.Context, tournament domain.T
 		visited[pageURL] = struct{}{}
 		body, resolvedURL, err := s.get(ctx, pageURL)
 		if err != nil {
-			continue
+			if errors.Is(err, errHTMLPageNotFound) {
+				return false, nil
+			}
+			// A failed eligibility probe cannot prove that the tournament has
+			// no standings. Propagate it so a partial discovery is not recorded
+			// as a fully successful crawl.
+			return false, err
 		}
 		// The HTTP client follows redirects. Validate the final URL as well as
 		// the candidate before accepting a page, otherwise a same-host redirect
@@ -138,11 +151,11 @@ func (s *Source) standingsPageAvailable(ctx context.Context, tournament domain.T
 		// response. This intentionally does not require rows yet: live and
 		// newly created tournaments can expose an empty standings page first.
 		if isStandingsPageURL(resolvedURL) {
-			return true
+			return true, nil
 		}
 		document, parseErr := parseStandingDocument(resolvedURL, body, s.inScope)
 		if parseErr != nil {
-			continue
+			return false, parseErr
 		}
 		for _, candidate := range document.CandidateURLs {
 			if !s.candidateBelongsToTournament(candidate, tournament) {
@@ -157,10 +170,10 @@ func (s *Source) standingsPageAvailable(ctx context.Context, tournament domain.T
 			// The explicit same-tournament link is the criterion. Its endpoint
 			// may be temporarily unavailable; FetchStandings handles that error
 			// through the crawler's sync-failure state.
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func isStandingsPageURL(raw string) bool {
@@ -528,6 +541,9 @@ func (s *Source) get(ctx context.Context, rawURL string) ([]byte, string, error)
 		return nil, "", fmt.Errorf("HTML redirect outside configured HTML scope")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, "", errHTMLPageNotFound
+		}
 		return nil, "", fmt.Errorf("HTML HTTP status %d", resp.StatusCode)
 	}
 	return body, finalURL.String(), nil
