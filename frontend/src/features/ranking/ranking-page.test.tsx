@@ -4,6 +4,34 @@ import { describe, expect, it, vi } from 'vitest'
 import { RankingPage } from './ranking-page'
 
 describe('RankingPage', () => {
+  it('renders independent metric directions and missing comparisons on desktop and mobile', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [
+      { rank: 1, trend: 'same', name: 'Opposite', includedTournamentCount: 2, gamesPlayed: 10, totalPoints: '20.00', pointsPerGame: '2.00', goalDifference: -2, pointsPerGameTrend: 'up', goalDifferenceTrend: 'down' },
+      { rank: 2, trend: 'same', name: 'Reverse', includedTournamentCount: 2, gamesPlayed: 10, totalPoints: '10.00', pointsPerGame: '1.00', goalDifference: 2, pointsPerGameTrend: 'down', goalDifferenceTrend: 'up' },
+      { rank: 3, trend: 'same', name: 'Neutral', includedTournamentCount: 2, gamesPlayed: 10, totalPoints: '10.00', pointsPerGame: '1.00', goalDifference: 0, pointsPerGameTrend: 'same', goalDifferenceTrend: 'same' },
+      { rank: 4, trend: 'new', name: 'Missing', includedTournamentCount: 1, gamesPlayed: null, totalPoints: '10.00', pointsPerGame: null, goalDifference: null, pointsPerGameTrend: 'unavailable', goalDifferenceTrend: 'unavailable' }
+    ], availableYears: [] }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<RankingPage />)
+    await screen.findAllByText('Opposite')
+    for (const metric of ['Punkte/Spiel', 'Tordifferenz']) {
+      for (const state of ['Gestiegen', 'Gefallen', 'Unverändert', 'Kein Vergleich']) {
+        expect(screen.getAllByLabelText(`${metric}: ${state}`)).toHaveLength(2)
+      }
+    }
+    expect(screen.getByText(/Stand vor dem neuesten gewerteten Turnier im gewählten Zeitraum/)).toHaveTextContent('auf zwei Nachkommastellen')
+    const card = screen.getByRole('article', { name: /Opposite/ })
+    expect(within(card).getByLabelText('Punkte/Spiel: Gestiegen')).toBeInTheDocument()
+    expect(within(card).getByLabelText('Tordifferenz: Gefallen')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Punkte/Spiel' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Tordifferenz' }))
+    await userEvent.type(screen.getByRole('textbox', { name: 'Spieler suchen' }), 'Opposite')
+    const row = screen.getAllByRole('row')[1]
+    expect(within(row).getByLabelText('Punkte/Spiel: Gestiegen')).toBeInTheDocument()
+    expect(within(row).getByLabelText('Tordifferenz: Gefallen')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('loads only the public endpoint and sorts missing values last', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [
       { rank: 1, name: 'Player One', includedTournamentCount: 2, gamesPlayed: null, totalPoints: null, pointsPerGame: null, goalDifference: 0 },
@@ -52,12 +80,13 @@ describe('RankingPage', () => {
 
   it('sorts exact decimal point strings without changing the trend value', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [
-      { rank: 1, trend: 'same', name: 'Lower', includedTournamentCount: 1, gamesPlayed: 1, totalPoints: '900719925474099.90', pointsPerGame: '1.00', goalDifference: 0 },
+      { rank: 1, trend: 'same', name: 'Lower', includedTournamentCount: 1, gamesPlayed: 1, totalPoints: '900719925474099.90', pointsPerGame: '900719925474099.91', goalDifference: 0 },
       { rank: 2, trend: 'up', name: 'Higher', includedTournamentCount: 1, gamesPlayed: 1, totalPoints: '900719925474099.91', pointsPerGame: '1.00', goalDifference: 0 }
     ], lastSyncAt: null, availableYears: [], selectedYear: null }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     vi.stubGlobal('fetch', fetchMock)
     render(<RankingPage />)
     await screen.findAllByText('Higher')
+    expect(screen.getAllByText('900719925474099.91')).toHaveLength(2)
     await userEvent.click(screen.getByRole('button', { name: 'Punkte' }))
     await waitFor(() => expect(screen.getAllByRole('row')[1]).toHaveTextContent('Lower'))
     expect(screen.getAllByLabelText('Tendenz: Gleich geblieben')).toHaveLength(2)

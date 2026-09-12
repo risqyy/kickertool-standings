@@ -63,19 +63,21 @@ type StandingSyncResult struct {
 }
 
 type PlayerAggregate struct {
-	Source             string
-	PlayerKey          string
-	PlayerName         string
-	TournamentCount    int
-	TotalPointsCents   *int64
-	GamesPlayed        *int
-	GoalDifference     *int
-	PointsPerGameCents *int64
-	PointsAvailable    bool
-	GamesAvailable     bool
-	GoalsAvailable     bool
-	Trend              RankingTrend
-	RecalculatedAt     time.Time
+	Source              string
+	PlayerKey           string
+	PlayerName          string
+	TournamentCount     int
+	TotalPointsCents    *int64
+	GamesPlayed         *int
+	GoalDifference      *int
+	PointsPerGameCents  *int64
+	PointsAvailable     bool
+	GamesAvailable      bool
+	GoalsAvailable      bool
+	Trend               RankingTrend
+	PointsPerGameTrend  MetricTrend
+	GoalDifferenceTrend MetricTrend
+	RecalculatedAt      time.Time
 }
 
 // RankingTrend describes the change in canonical rank against the snapshot
@@ -89,4 +91,16 @@ const (
 	RankingTrendDown RankingTrend = "down"
 	RankingTrendSame RankingTrend = "same"
 	RankingTrendNew  RankingTrend = "new"
+)
+
+// MetricTrend compares independently available values from the same predecessor
+// snapshot as RankingTrend. Higher values are improvements. PPG uses the displayed,
+// commercially rounded integer hundredths; goal difference uses exact integers.
+type MetricTrend string
+
+const (
+	MetricTrendUp          MetricTrend = "up"
+	MetricTrendDown        MetricTrend = "down"
+	MetricTrendSame        MetricTrend = "same"
+	MetricTrendUnavailable MetricTrend = "unavailable"
 )

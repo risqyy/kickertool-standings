@@ -17,6 +17,10 @@ func (r *Repository) withRankingTrends(ctx context.Context, ranking []domain.Pla
 	if len(ranking) == 0 {
 		return ranking, nil
 	}
+	for index := range ranking {
+		ranking[index].PointsPerGameTrend = domain.MetricTrendUnavailable
+		ranking[index].GoalDifferenceTrend = domain.MetricTrendUnavailable
+	}
 
 	tournaments, err := r.rankedQualifyingTournaments(ctx, year, month...)
 	if err != nil {
@@ -49,10 +53,27 @@ func (r *Repository) withRankingTrends(ctx context.Context, ranking []domain.Pla
 		return nil, fmt.Errorf("load ranking trend baseline: %w", err)
 	}
 	previousRanks := make(map[string]int, len(previous))
+	previousMetrics := make(map[string]domain.PlayerAggregate, len(previous))
+	correctionOnlyMetrics := make(map[string]domain.PlayerAggregate)
 	for index, row := range previous {
 		previousRanks[rankingIdentity(row)] = index + 1
+		previousMetrics[rankingIdentity(row)] = row
+		if row.Source == "manual_correction" {
+			correctionOnlyMetrics[row.PlayerKey] = row
+		}
 	}
 	for index := range ranking {
+		baseline, found := previousMetrics[rankingIdentity(ranking[index])]
+		if !found {
+			// The first source result changes a correction-only aggregate's
+			// source label, but not the canonical player or prior metrics.
+			// Never substitute a baseline belonging to a different real source.
+			baseline, found = correctionOnlyMetrics[ranking[index].PlayerKey]
+		}
+		if found {
+			ranking[index].PointsPerGameTrend = compareMetricValues(validPPG(ranking[index]), validPPG(baseline))
+			ranking[index].GoalDifferenceTrend = compareMetricValues(ranking[index].GoalDifference, baseline.GoalDifference)
+		}
 		currentRank := index + 1
 		previousRank, found := previousRanks[rankingIdentity(ranking[index])]
 		switch {
@@ -67,6 +88,26 @@ func (r *Repository) withRankingTrends(ctx context.Context, ranking []domain.Pla
 		}
 	}
 	return ranking, nil
+}
+
+func validPPG(row domain.PlayerAggregate) *int64 {
+	if row.GamesPlayed == nil || *row.GamesPlayed <= 0 {
+		return nil
+	}
+	return row.PointsPerGameCents
+}
+
+func compareMetricValues[T int | int64](current, previous *T) domain.MetricTrend {
+	switch {
+	case current == nil || previous == nil:
+		return domain.MetricTrendUnavailable
+	case *current > *previous:
+		return domain.MetricTrendUp
+	case *current < *previous:
+		return domain.MetricTrendDown
+	default:
+		return domain.MetricTrendSame
+	}
 }
 
 func rankingIdentity(row domain.PlayerAggregate) string {

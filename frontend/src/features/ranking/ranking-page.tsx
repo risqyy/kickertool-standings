@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { AlertCircle, ArrowDown, ArrowUp, ArrowUpDown, Minus, RefreshCw, Search } from 'lucide-react'
 import { getRankings } from '@/api/client'
-import type { RankingMonth, RankingRow, RankingTrend } from '@/api/types'
+import type { MetricTrend, RankingMonth, RankingRow, RankingTrend } from '@/api/types'
 import { Alert } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -10,7 +10,6 @@ import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { formatDecimal } from '@/lib/utils'
 
 type SortKey = 'rank' | 'name' | 'tournaments' | 'games' | 'points' | 'ppg' | 'goals'
 type RankingPeriod = { year: number; month?: number } | null
@@ -101,6 +100,12 @@ function TrendValue({ trend }: { trend: RankingTrend | undefined }) {
   return <span className="inline-flex items-center justify-center gap-1" aria-label={`Tendenz: ${label}`}>{icon}<span className="sr-only">{label}</span></span>
 }
 
+function MetricValue({ value, trend, label }: { value: ReactNode; trend: MetricTrend | undefined; label: string }) {
+  const description = trend === 'up' ? 'Gestiegen' : trend === 'down' ? 'Gefallen' : trend === 'same' ? 'Unverändert' : 'Kein Vergleich'
+  const icon = trend === 'up' ? <ArrowUp size={16} aria-hidden="true" /> : trend === 'down' ? <ArrowDown size={16} aria-hidden="true" /> : trend === 'same' ? <Minus size={16} aria-hidden="true" /> : <span aria-hidden="true" className="text-xs text-muted-foreground">k. V.</span>
+  return <span className="inline-flex items-center gap-1.5 whitespace-nowrap"><span>{value}</span><span className="inline-flex items-center" title={`${label}: ${description}`} aria-label={`${label}: ${description}`}>{icon}<span className="sr-only">{description}</span></span></span>
+}
+
 function cellValue(row: RankingRow, key: ColumnKey): ReactNode {
   switch (key) {
     case 'rank': return row.rank
@@ -108,9 +113,9 @@ function cellValue(row: RankingRow, key: ColumnKey): ReactNode {
     case 'name': return row.name
     case 'games': return row.gamesPlayed ?? '—'
     case 'tournaments': return row.includedTournamentCount
-    case 'goals': return row.goalDifference ?? '—'
+    case 'goals': return <MetricValue value={row.goalDifference ?? '—'} trend={row.goalDifferenceTrend} label="Tordifferenz" />
     case 'points': return formatWholePoints(row.totalPoints)
-    case 'ppg': return formatDecimal(row.pointsPerGame)
+    case 'ppg': return <MetricValue value={row.pointsPerGame ?? '—'} trend={row.pointsPerGameTrend} label="Punkte/Spiel" />
   }
 }
 
@@ -202,6 +207,7 @@ export function RankingPage() {
         </fieldset>
       </CardHeader>
       <CardContent aria-busy={status === 'loading'}>
+        <p className="mb-4 max-w-3xl text-sm text-muted-foreground">Tendenzen vergleichen mit dem Stand vor dem neuesten gewerteten Turnier im gewählten Zeitraum. Bei Punkte/Spiel und Tordifferenz bedeuten höhere Werte eine Verbesserung. Punkte/Spiel wird auf zwei Nachkommastellen verglichen. k. V. = kein Vergleich: Ein gültiger Vorher- oder Nachherwert fehlt.</p>
         {status === 'loading' && <div className="space-y-3" role="status" aria-label={`${activePeriodLabel} wird geladen`}>
           {[1, 2, 3, 4, 5].map(item => <Skeleton key={item} className="h-12 w-full" />)}
         </div>}

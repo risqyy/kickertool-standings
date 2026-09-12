@@ -93,7 +93,7 @@ func (h *PublicRankingAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	}
 	rows := make([]publicRankingRow, 0, len(aggregates))
 	for index, aggregate := range aggregates {
-		rows = append(rows, publicRankingRow{Rank: index + 1, Trend: publicTrend(aggregate.Trend), Name: aggregate.PlayerName, IncludedTournamentCount: aggregate.TournamentCount, GamesPlayed: aggregate.GamesPlayed, TotalPoints: centsString(aggregate.TotalPointsCents), PointsPerGame: centsString(aggregate.PointsPerGameCents), GoalDifference: aggregate.GoalDifference})
+		rows = append(rows, publicRankingRow{Rank: index + 1, Trend: publicTrend(aggregate.Trend), PointsPerGameTrend: publicMetricTrend(aggregate.PointsPerGameTrend), GoalDifferenceTrend: publicMetricTrend(aggregate.GoalDifferenceTrend), Name: aggregate.PlayerName, IncludedTournamentCount: aggregate.TournamentCount, GamesPlayed: aggregate.GamesPlayed, TotalPoints: centsString(aggregate.TotalPointsCents), PointsPerGame: centsString(aggregate.PointsPerGameCents), GoalDifference: aggregate.GoalDifference})
 	}
 	var lastSync *time.Time
 	lastSyncStatus := "error"
@@ -157,12 +157,21 @@ func requestedRankingMonth(r *http.Request, year *int) (*int, error) {
 type publicRankingRow struct {
 	Rank                    int     `json:"rank"`
 	Trend                   string  `json:"trend"`
+	PointsPerGameTrend      string  `json:"pointsPerGameTrend"`
+	GoalDifferenceTrend     string  `json:"goalDifferenceTrend"`
 	Name                    string  `json:"name"`
 	IncludedTournamentCount int     `json:"includedTournamentCount"`
 	GamesPlayed             *int    `json:"gamesPlayed"`
 	TotalPoints             *string `json:"totalPoints"`
 	PointsPerGame           *string `json:"pointsPerGame"`
 	GoalDifference          *int    `json:"goalDifference"`
+}
+
+func publicMetricTrend(value domain.MetricTrend) string {
+	if value == "" {
+		return string(domain.MetricTrendUnavailable)
+	}
+	return string(value)
 }
 
 func publicTrend(value domain.RankingTrend) string {
