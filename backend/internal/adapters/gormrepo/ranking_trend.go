@@ -54,12 +54,23 @@ func (r *Repository) withRankingTrends(ctx context.Context, ranking []domain.Pla
 	}
 	previousRanks := make(map[string]int, len(previous))
 	previousMetrics := make(map[string]domain.PlayerAggregate, len(previous))
+	correctionOnlyMetrics := make(map[string]domain.PlayerAggregate)
 	for index, row := range previous {
 		previousRanks[rankingIdentity(row)] = index + 1
 		previousMetrics[rankingIdentity(row)] = row
+		if row.Source == "manual_correction" {
+			correctionOnlyMetrics[row.PlayerKey] = row
+		}
 	}
 	for index := range ranking {
-		if baseline, found := previousMetrics[rankingIdentity(ranking[index])]; found {
+		baseline, found := previousMetrics[rankingIdentity(ranking[index])]
+		if !found {
+			// The first source result changes a correction-only aggregate's
+			// source label, but not the canonical player or prior metrics.
+			// Never substitute a baseline belonging to a different real source.
+			baseline, found = correctionOnlyMetrics[ranking[index].PlayerKey]
+		}
+		if found {
 			ranking[index].PointsPerGameTrend = compareMetricValues(validPPG(ranking[index]), validPPG(baseline))
 			ranking[index].GoalDifferenceTrend = compareMetricValues(ranking[index].GoalDifference, baseline.GoalDifference)
 		}
