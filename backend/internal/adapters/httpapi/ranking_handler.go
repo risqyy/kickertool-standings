@@ -40,6 +40,11 @@ func (h *PublicRankingAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	month, err := requestedRankingMonth(r, year)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	periodReader, supportsPeriods := h.reader.(ports.PeriodRankingReader)
 	availableYears := []int{}
 	if supportsPeriods {
@@ -54,8 +59,26 @@ func (h *PublicRankingAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		availableYears = append([]int{}, availableYears...)
 		sort.Slice(availableYears, func(i, j int) bool { return availableYears[i] > availableYears[j] })
 	}
+	monthReader, supportsMonths := h.reader.(ports.MonthlyRankingReader)
+	availableMonths := []domain.RankingMonth{}
+	if supportsMonths {
+		availableMonths, err = monthReader.ListAvailableRankingMonths(r.Context())
+		if err != nil {
+			http.Error(w, "could not load ranking months", http.StatusInternalServerError)
+			return
+		}
+		if availableMonths == nil {
+			availableMonths = []domain.RankingMonth{}
+		}
+	}
 	var aggregates []domain.PlayerAggregate
-	if year != nil {
+	if month != nil {
+		if !supportsMonths {
+			http.Error(w, "month rankings are unavailable", http.StatusInternalServerError)
+			return
+		}
+		aggregates, err = monthReader.ListPlayerRankingForMonth(r.Context(), *year, *month)
+	} else if year != nil {
 		if !supportsPeriods {
 			http.Error(w, "year rankings are unavailable", http.StatusInternalServerError)
 			return
@@ -88,7 +111,7 @@ func (h *PublicRankingAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(map[string]any{"items": rows, "lastSyncAt": lastSync, "lastSyncStatus": lastSyncStatus, "availableYears": availableYears, "selectedYear": year})
+	_ = json.NewEncoder(w).Encode(map[string]any{"items": rows, "lastSyncAt": lastSync, "lastSyncStatus": lastSyncStatus, "availableYears": availableYears, "selectedYear": year, "selectedMonth": month, "availableMonths": availableMonths})
 }
 
 func requestedRankingYear(r *http.Request) (*int, error) {
@@ -107,6 +130,26 @@ func requestedRankingYear(r *http.Request) (*int, error) {
 	parsed, err := strconv.Atoi(values[0])
 	if err != nil || parsed < 1000 || parsed > 9999 {
 		return nil, fmt.Errorf("year must be a valid four-digit calendar year")
+	}
+	return &parsed, nil
+}
+
+func requestedRankingMonth(r *http.Request, year *int) (*int, error) {
+	values, ok := r.URL.Query()["month"]
+	if !ok {
+		return nil, nil
+	}
+	if year == nil || len(values) != 1 || len(values[0]) < 1 || len(values[0]) > 2 {
+		return nil, fmt.Errorf("month must be 1 through 12 and requires year")
+	}
+	for _, character := range values[0] {
+		if character < '0' || character > '9' {
+			return nil, fmt.Errorf("month must be 1 through 12 and requires year")
+		}
+	}
+	parsed, err := strconv.Atoi(values[0])
+	if err != nil || parsed < 1 || parsed > 12 {
+		return nil, fmt.Errorf("month must be 1 through 12 and requires year")
 	}
 	return &parsed, nil
 }

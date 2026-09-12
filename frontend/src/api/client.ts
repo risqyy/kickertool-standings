@@ -39,8 +39,11 @@ async function adminMutation<T>(path: string, csrf: string, init: RequestInit): 
   }
 }
 
-export async function getRankings(year?: number | null) {
-  const search = year === undefined || year === null ? '' : '?' + new URLSearchParams({ year: String(year) })
+export async function getRankings(year?: number | null, month?: number | null) {
+  const params = new URLSearchParams()
+  if (year !== undefined && year !== null) params.set('year', String(year))
+  if (month !== undefined && month !== null) params.set('month', String(month))
+  const search = params.size ? '?' + params : ''
   return request<RankingsResponse>('/api/v1/public/rankings' + search)
 }
 export async function getAdminSession() { return request<{ authenticated: boolean; csrf_token: string }>('/api/v1/admin/session') }

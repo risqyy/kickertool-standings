@@ -13,12 +13,16 @@ export interface RankingRow {
   goalDifference: Nullable<number>
 }
 
+export interface RankingMonth { year: number; month: number }
+
 export interface RankingsResponse {
   items: RankingRow[]
   lastSyncStatus: 'ok' | 'never' | 'error'
   lastSyncAt: Nullable<string>
   availableYears: number[]
   selectedYear: Nullable<number>
+  selectedMonth: Nullable<number>
+  availableMonths: RankingMonth[]
 }
 
 export interface Tournament {

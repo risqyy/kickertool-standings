@@ -13,12 +13,12 @@ import (
 // the comparison here (rather than in an HTTP handler) means annual and
 // cumulative readers use the same source/correction snapshot and the same
 // tie-break order as the rank itself.
-func (r *Repository) withRankingTrends(ctx context.Context, ranking []domain.PlayerAggregate, year *int) ([]domain.PlayerAggregate, error) {
+func (r *Repository) withRankingTrends(ctx context.Context, ranking []domain.PlayerAggregate, year *int, month ...int) ([]domain.PlayerAggregate, error) {
 	if len(ranking) == 0 {
 		return ranking, nil
 	}
 
-	tournaments, err := r.rankedQualifyingTournaments(ctx, year)
+	tournaments, err := r.rankedQualifyingTournaments(ctx, year, month...)
 	if err != nil {
 		return nil, err
 	}
@@ -44,7 +44,7 @@ func (r *Repository) withRankingTrends(ctx context.Context, ranking []domain.Pla
 	// exactly the latest tournament boundary belongs to the current ranking,
 	// never to this preceding snapshot.
 	cutoff := berlinCalendarDay(latest.Date, location)
-	previous, err := r.listRankingBeforeTournament(ctx, tournaments, latest, cutoff, year)
+	previous, err := r.listRankingBeforeTournament(ctx, tournaments, latest, cutoff, year, month...)
 	if err != nil {
 		return nil, fmt.Errorf("load ranking trend baseline: %w", err)
 	}
@@ -77,8 +77,8 @@ func rankingIdentity(row domain.PlayerAggregate) string {
 // with complete standings, then orders them chronologically. The Berlin
 // calendar date is primary; start time (when present), source identity and
 // persisted ID make same-day sections deterministic regardless of sync order.
-func (r *Repository) rankedQualifyingTournaments(ctx context.Context, year *int) ([]TournamentModel, error) {
-	tournaments, err := r.qualifiedRankingTournaments(ctx, year)
+func (r *Repository) rankedQualifyingTournaments(ctx context.Context, year *int, month ...int) ([]TournamentModel, error) {
+	tournaments, err := r.qualifiedRankingTournaments(ctx, year, month...)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +136,7 @@ func tournamentChronologyMoment(value TournamentModel) *time.Time {
 // date-only query: earlier sections on the same Berlin day remain part of the
 // baseline. Corrections still use the strict calendar-date cutoff so a
 // correction effective on the newest tournament day belongs only to current.
-func (r *Repository) listRankingBeforeTournament(ctx context.Context, tournaments []TournamentModel, latest TournamentModel, cutoff time.Time, year *int) ([]domain.PlayerAggregate, error) {
+func (r *Repository) listRankingBeforeTournament(ctx context.Context, tournaments []TournamentModel, latest TournamentModel, cutoff time.Time, year *int, month ...int) ([]domain.PlayerAggregate, error) {
 	refs := make([]uint, 0, len(tournaments)-1)
 	for _, tournament := range tournaments {
 		if tournament.ID != latest.ID {
@@ -152,7 +152,7 @@ func (r *Repository) listRankingBeforeTournament(ctx context.Context, tournament
 			return nil, fmt.Errorf("list trend baseline standings: %w", err)
 		}
 	}
-	corrections, err := r.activeCorrections(ctx, r.clock.Now(), year, &cutoff)
+	corrections, err := r.activeCorrections(ctx, r.clock.Now(), year, &cutoff, month...)
 	if err != nil {
 		return nil, fmt.Errorf("list trend baseline corrections: %w", err)
 	}
