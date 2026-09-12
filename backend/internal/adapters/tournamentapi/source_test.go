@@ -164,3 +164,14 @@ func TestSourceRequiresTokenAndHandlesForbidden(t *testing.T) {
 		t.Fatalf("expected forbidden auth error, got %v", err)
 	}
 }
+
+func TestTournamentListingRejectsMissingIdentity(t *testing.T) {
+	source, closeServer := testSource(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`[{"name":"Unidentifiable tournament"}]`))
+	})
+	defer closeServer()
+	tournaments, err := source.FetchTournaments(context.Background())
+	if err == nil || tournaments != nil {
+		t.Fatalf("invalid discovery was hidden: tournaments=%+v err=%v", tournaments, err)
+	}
+}

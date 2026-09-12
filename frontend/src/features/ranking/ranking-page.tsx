@@ -10,7 +10,7 @@ import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { formatDate, formatDecimal } from '@/lib/utils'
+import { formatDecimal } from '@/lib/utils'
 
 type SortKey = 'rank' | 'name' | 'tournaments' | 'games' | 'points' | 'ppg' | 'goals'
 type RankingPeriod = number | null
@@ -118,6 +118,7 @@ function SortButton({ label, active, direction, onClick }: { label: string; acti
 export function RankingPage() {
   const [rows, setRows] = useState<RankingRow[]>([])
   const [lastSync, setLastSync] = useState<string | null>(null)
+  const [syncStatus, setSyncStatus] = useState<'ok' | 'never' | 'error'>('never')
   const [availableYears, setAvailableYears] = useState<number[]>([])
   const [selectedPeriod, setSelectedPeriod] = useState<RankingPeriod>(null)
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
@@ -132,6 +133,7 @@ export function RankingPage() {
       if (generation !== requestGeneration.current) return
       setRows(value.items)
       setLastSync(value.lastSyncAt ?? null)
+      setSyncStatus(value.lastSyncStatus ?? (value.lastSyncAt ? 'ok' : 'never'))
       setAvailableYears(Array.from(new Set(value.availableYears ?? [])).sort((a, b) => b - a))
       setSelectedPeriod(value.selectedYear ?? requestedPeriod)
       setStatus('ready')
@@ -163,7 +165,7 @@ export function RankingPage() {
         <p className="mt-2 max-w-2xl text-muted-foreground">Aktiver Zeitraum: <span className="font-medium text-foreground">{activePeriodLabel}</span></p>
         <p className="mt-1 max-w-2xl text-muted-foreground">Akkumulierte Werte aus den ausdrücklich einbezogenen abgeschlossenen Turnieren.</p>
       </div>
-      <div className="text-sm text-muted-foreground">Letzte Synchronisierung: {formatDate(lastSync)}</div>
+      <div className="text-sm text-muted-foreground">Letzte Synchronisierung: {status === 'loading' ? 'Wird geladen ...' : status === 'error' || syncStatus === 'error' ? 'Status konnte nicht geladen werden.' : lastSync ? new Intl.DateTimeFormat('de-DE', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Europe/Berlin' }).format(new Date(lastSync)) + ' (Europe/Berlin)' : 'Noch kein erfolgreicher Abgleich.'}</div>
     </div>
     <Card>
       <CardHeader className="gap-4 sm:flex-row sm:items-end sm:justify-between">

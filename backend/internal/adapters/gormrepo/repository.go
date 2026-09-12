@@ -312,7 +312,7 @@ func OpenSQLite(path string, clock ports.Clock) (*Repository, *gorm.DB, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	if err := db.AutoMigrate(&TournamentModel{}, &DisciplineModel{}, &StageModel{}, &GroupModel{}, &EntryModel{}, &PlayerModel{}, &PlayerNameAliasModel{}, &SourcePlayerIdentityModel{}, &EntryMembershipModel{}, &GroupStandingModel{}, &AllocationModel{}, &StandingModel{}, &PlayerAggregateModel{}, &PlayerMergeAuditModel{}, &TournamentInclusionAuditModel{}, &ManualRankingCorrectionModel{}, &ManualRankingCorrectionRevisionModel{}); err != nil {
+	if err := db.AutoMigrate(&CrawlSyncStatusModel{}, &TournamentModel{}, &DisciplineModel{}, &StageModel{}, &GroupModel{}, &EntryModel{}, &PlayerModel{}, &PlayerNameAliasModel{}, &SourcePlayerIdentityModel{}, &EntryMembershipModel{}, &GroupStandingModel{}, &AllocationModel{}, &StandingModel{}, &PlayerAggregateModel{}, &PlayerMergeAuditModel{}, &TournamentInclusionAuditModel{}, &ManualRankingCorrectionModel{}, &ManualRankingCorrectionRevisionModel{}); err != nil {
 		return nil, db, fmt.Errorf("auto migrate tournaments: %w", err)
 	}
 	if err := backfillManualCorrectionYears(db); err != nil {
@@ -329,7 +329,7 @@ func New(db *gorm.DB, clock ports.Clock) (*Repository, error) {
 	if db == nil {
 		return nil, errors.New("gorm db is required")
 	}
-	if err := db.AutoMigrate(&TournamentModel{}, &DisciplineModel{}, &StageModel{}, &GroupModel{}, &EntryModel{}, &PlayerModel{}, &PlayerNameAliasModel{}, &SourcePlayerIdentityModel{}, &EntryMembershipModel{}, &GroupStandingModel{}, &AllocationModel{}, &StandingModel{}, &PlayerAggregateModel{}, &PlayerMergeAuditModel{}, &TournamentInclusionAuditModel{}, &ManualRankingCorrectionModel{}, &ManualRankingCorrectionRevisionModel{}); err != nil {
+	if err := db.AutoMigrate(&CrawlSyncStatusModel{}, &TournamentModel{}, &DisciplineModel{}, &StageModel{}, &GroupModel{}, &EntryModel{}, &PlayerModel{}, &PlayerNameAliasModel{}, &SourcePlayerIdentityModel{}, &EntryMembershipModel{}, &GroupStandingModel{}, &AllocationModel{}, &StandingModel{}, &PlayerAggregateModel{}, &PlayerMergeAuditModel{}, &TournamentInclusionAuditModel{}, &ManualRankingCorrectionModel{}, &ManualRankingCorrectionRevisionModel{}); err != nil {
 		return nil, fmt.Errorf("auto migrate tournaments: %w", err)
 	}
 	if err := backfillManualCorrectionYears(db); err != nil {

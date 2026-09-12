@@ -82,8 +82,8 @@ func (s *Source) FetchTournaments(ctx context.Context) ([]domain.Tournament, err
 			break
 		}
 		for _, item := range page {
-			if item.ID == "" {
-				continue
+			if strings.TrimSpace(item.ID) == "" {
+				return nil, fmt.Errorf("tournament listing offset %d contains an entry without an id", offset)
 			}
 			if _, duplicate := seen[item.ID]; duplicate {
 				return nil, fmt.Errorf("tournament pagination repeated id %s", item.ID)

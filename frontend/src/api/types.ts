@@ -15,6 +15,7 @@ export interface RankingRow {
 
 export interface RankingsResponse {
   items: RankingRow[]
+  lastSyncStatus: 'ok' | 'never' | 'error'
   lastSyncAt: Nullable<string>
   availableYears: number[]
   selectedYear: Nullable<number>

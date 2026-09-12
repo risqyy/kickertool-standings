@@ -19,6 +19,7 @@ type CrawlerService struct {
 	standingSource    ports.TournamentStandingSource
 	standingRepo      ports.StandingRepository
 	standingStateRepo ports.StandingSyncStateRepository
+	syncStatusRepo    ports.CrawlSyncStatusRepository
 	clock             ports.Clock
 	logger            *zerolog.Logger
 }
@@ -39,6 +40,9 @@ func WithStandings(source ports.TournamentStandingSource, repo ports.StandingRep
 
 func NewCrawler(source ports.TournamentSource, repo ports.TournamentRepository, clock ports.Clock, logger *zerolog.Logger, options ...CrawlerOption) *CrawlerService {
 	crawler := &CrawlerService{source: source, repo: repo, clock: clock, logger: logger}
+	if statusRepo, ok := repo.(ports.CrawlSyncStatusRepository); ok {
+		crawler.syncStatusRepo = statusRepo
+	}
 	for _, option := range options {
 		option(crawler)
 	}
@@ -56,6 +60,17 @@ func (c *CrawlerService) Crawl(ctx context.Context) (result domain.SyncResult, e
 	}
 	defer func() {
 		result.FinishedAt = c.clock.Now()
+		if err == nil {
+			err = ctx.Err()
+		}
+		if err == nil && (result.Invalid > 0 || result.TournamentsFailed > 0) {
+			err = fmt.Errorf("crawl incomplete: %d invalid tournaments, %d failed standings", result.Invalid, result.TournamentsFailed)
+		}
+		if err == nil && c.syncStatusRepo != nil {
+			if statusErr := c.syncStatusRepo.RecordSuccessfulCrawl(ctx, result.FinishedAt); statusErr != nil {
+				err = fmt.Errorf("persist successful crawl status: %w", statusErr)
+			}
+		}
 		if c.logger != nil {
 			e := c.logger.Info()
 			if err != nil {
@@ -141,6 +156,9 @@ func (c *CrawlerService) Crawl(ctx context.Context) (result domain.SyncResult, e
 			}
 			started := c.clock.Now()
 			snapshot, standingsErr := c.standingSource.FetchStandings(ctx, tournament)
+			if standingsErr == nil && !snapshot.Complete {
+				standingsErr = fmt.Errorf("incomplete standings snapshot")
+			}
 			if standingsErr != nil {
 				result.TournamentsFailed++
 				c.markStandingFailure(ctx, tournament)

@@ -112,7 +112,7 @@ func TestCrawlerValidatesAndLogsStructuredResult(t *testing.T) {
 	logger := zerolog.New(&log)
 	crawler := NewCrawler(fakeSource{tournaments: []domain.Tournament{valid, invalid}}, repo, clock, &logger)
 	result, err := crawler.Crawl(context.Background())
-	if err != nil || result.Found != 2 || result.Invalid != 1 || result.Inserted != 1 || len(repo.received) != 1 {
+	if err == nil || result.Found != 2 || result.Invalid != 1 || result.Inserted != 1 || len(repo.received) != 1 {
 		t.Fatalf("result=%+v err=%v received=%d", result, err, len(repo.received))
 	}
 	text := log.String()
@@ -154,8 +154,8 @@ func TestCrawlerMarksFailedStandingsWithoutPersistingOrAggregatingSnapshot(t *te
 	crawler := NewCrawler(fakeSource{tournaments: []domain.Tournament{tournament}}, state, clock, nil, WithStandings(standingSource, standingRepo, state))
 
 	result, err := crawler.Crawl(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("partial failure must fail the crawl")
 	}
 	if result.TournamentsProcessed != 1 || result.TournamentsFailed != 1 || result.TournamentsSucceeded != 0 {
 		t.Fatalf("unexpected crawl result: %+v", result)
