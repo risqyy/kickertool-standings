@@ -346,10 +346,18 @@ components:
   schemas:
     RankingResponse:
       type: object
-      required: [items, lastSyncAt, availableYears, selectedYear]
+      required: [items, lastSyncAt, lastSyncStatus, availableYears, selectedYear]
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/PublicRankingRow' } }
-        lastSyncAt: { type: string, format: date-time, nullable: true }
+        lastSyncStatus:
+          type: string
+          enum: [ok, never, error]
+          description: Whether the last fully successful crawl completion is available, none has been recorded, or status retrieval failed. Independent of ranking period.
+        lastSyncAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Persisted completion of the last fully successful crawl, including unchanged runs. Null for never/error status. Failed later crawls leave the previous successful completion intact.
         availableYears:
           type: array
           description: Years with included, completed tournaments and complete standings, newest first.

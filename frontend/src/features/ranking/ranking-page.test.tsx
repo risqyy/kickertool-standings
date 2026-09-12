@@ -145,3 +145,21 @@ describe('RankingPage', () => {
     expect((await screen.findAllByText('Recovered Player')).length).toBeGreaterThan(0)
   })
 })
+
+
+describe('successful crawl status', () => {
+  it('shows date and time in Europe/Berlin', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [], lastSyncAt: '2026-09-12T12:45:00Z', lastSyncStatus: 'ok', availableYears: [] }), { status: 200 })))
+    render(<RankingPage />)
+    expect(await screen.findByText(/12.09.2026, 14:45/)).toHaveTextContent('Europe/Berlin')
+  })
+
+  it.each([
+    ['never', 'Noch kein erfolgreicher Abgleich.'],
+    ['error', 'Status konnte nicht geladen werden.']
+  ])('distinguishes %s status', async (lastSyncStatus, label) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [], lastSyncAt: null, lastSyncStatus, availableYears: [] }), { status: 200 })))
+    render(<RankingPage />)
+    expect(await screen.findByText(`Letzte Synchronisierung: ${label}`)).toBeVisible()
+  })
+})

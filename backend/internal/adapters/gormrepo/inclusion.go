@@ -112,17 +112,6 @@ func (r *Repository) GetDashboard(ctx context.Context) (domain.Dashboard, error)
 	return result, nil
 }
 
-func (r *Repository) LastSyncAt(ctx context.Context) (*time.Time, error) {
-	var latest time.Time
-	if err := r.db.WithContext(ctx).Model(&TournamentModel{}).Select("MAX(standings_synced_at)").Scan(&latest).Error; err != nil {
-		return nil, err
-	}
-	if latest.IsZero() {
-		return nil, nil
-	}
-	return &latest, nil
-}
-
 func (r *Repository) SetTournamentRankingInclusion(ctx context.Context, tournamentID uint, included bool, expectedVersion int64, reason string) (result domain.TournamentInclusionChange, err error) {
 	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var tournament TournamentModel

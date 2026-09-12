@@ -73,14 +73,22 @@ func (h *PublicRankingAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		rows = append(rows, publicRankingRow{Rank: index + 1, Trend: publicTrend(aggregate.Trend), Name: aggregate.PlayerName, IncludedTournamentCount: aggregate.TournamentCount, GamesPlayed: aggregate.GamesPlayed, TotalPoints: centsString(aggregate.TotalPointsCents), PointsPerGame: centsString(aggregate.PointsPerGameCents), GoalDifference: aggregate.GoalDifference})
 	}
 	var lastSync *time.Time
+	lastSyncStatus := "error"
 	if source, ok := h.reader.(interface {
 		LastSyncAt(context.Context) (*time.Time, error)
 	}); ok {
-		lastSync, _ = source.LastSyncAt(r.Context())
+		lastSync, err = source.LastSyncAt(r.Context())
+		if err != nil {
+			lastSync = nil
+		} else if lastSync == nil {
+			lastSyncStatus = "never"
+		} else {
+			lastSyncStatus = "ok"
+		}
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(map[string]any{"items": rows, "lastSyncAt": lastSync, "availableYears": availableYears, "selectedYear": year})
+	_ = json.NewEncoder(w).Encode(map[string]any{"items": rows, "lastSyncAt": lastSync, "lastSyncStatus": lastSyncStatus, "availableYears": availableYears, "selectedYear": year})
 }
 
 func requestedRankingYear(r *http.Request) (*int, error) {

@@ -41,6 +41,12 @@ type StandingRepository interface {
 	UpsertStandingSnapshot(ctx context.Context, snapshot domain.StandingSnapshot) (domain.StandingSyncResult, error)
 }
 
+// CrawlSyncStatusRepository records only fully successful crawl completions.
+type CrawlSyncStatusRepository interface {
+	RecordSuccessfulCrawl(ctx context.Context, finishedAt time.Time) error
+	LastSyncAt(ctx context.Context) (*time.Time, error)
+}
+
 type StandingSyncStateRepository interface {
 	MarkStandingSyncFailed(ctx context.Context, source, tournamentID string) error
 }
