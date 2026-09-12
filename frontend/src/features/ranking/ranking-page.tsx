@@ -165,7 +165,7 @@ export function RankingPage() {
         <p className="mt-2 max-w-2xl text-muted-foreground">Aktiver Zeitraum: <span className="font-medium text-foreground">{activePeriodLabel}</span></p>
         <p className="mt-1 max-w-2xl text-muted-foreground">Akkumulierte Werte aus den ausdr√ºcklich einbezogenen abgeschlossenen Turnieren.</p>
       </div>
-      <div className="text-sm text-muted-foreground">Letzte Synchronisierung: {status === 'loading' ? 'Wird geladen Ö' : status === 'error' || syncStatus === 'error' ? 'Status konnte nicht geladen werden.' : lastSync ? new Intl.DateTimeFormat('de-DE', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Europe/Berlin' }).format(new Date(lastSync)) + ' (Europe/Berlin)' : 'Noch kein erfolgreicher Abgleich.'}</div>
+      <div className="text-sm text-muted-foreground">Letzte Synchronisierung: {status === 'loading' ? 'Wird geladen ...' : status === 'error' || syncStatus === 'error' ? 'Status konnte nicht geladen werden.' : lastSync ? new Intl.DateTimeFormat('de-DE', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Europe/Berlin' }).format(new Date(lastSync)) + ' (Europe/Berlin)' : 'Noch kein erfolgreicher Abgleich.'}</div>
     </div>
     <Card>
       <CardHeader className="gap-4 sm:flex-row sm:items-end sm:justify-between">
