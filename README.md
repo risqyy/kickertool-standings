@@ -144,6 +144,11 @@ npm run build
 
 Contract changes must update `backend/api/openapi.yaml` and the typed frontend client together.
 
+Public browser regressions can run without backend credentials or a database:
+`cd frontend` then `npx playwright test --config playwright.public.config.ts`.
+They exercise monthly selection, independent metric trends, synchronization
+status, search, sorting, and desktop/mobile layouts with fixed API fixtures.
+
 Public rankings expose independent `pointsPerGameTrend` and `goalDifferenceTrend`
 states (`up`, `down`, `same`, `unavailable`) alongside the placement trend.
 All three use the snapshot before the newest included completed tournament with
