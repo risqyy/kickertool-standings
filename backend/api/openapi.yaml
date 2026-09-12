@@ -393,9 +393,21 @@ components:
       allOf:
         - $ref: '#/components/schemas/RankingRow'
         - type: object
-          required: [trend]
+          required: [trend, pointsPerGameTrend, goalDifferenceTrend]
           properties:
             trend: { type: string, enum: [up, down, same, new] }
+            pointsPerGameTrend:
+              allOf:
+                - $ref: '#/components/schemas/MetricTrend'
+              description: Compares commercially rounded hundredths displayed as pointsPerGame; unavailable if either snapshot lacks known positive games or points.
+            goalDifferenceTrend:
+              allOf:
+                - $ref: '#/components/schemas/MetricTrend'
+              description: Compares exact integer goal differences independently of pointsPerGameTrend.
+    MetricTrend:
+      type: string
+      enum: [up, down, same, unavailable]
+      description: Higher values are improvements. Compares against the ranking before the latest included completed tournament with complete standings within the selected period. Unavailable means a valid before or after value is missing. Effective corrections use the same cutoff as the placement trend. Repeated unchanged crawls do not change the baseline.
     LegacyRankingRow:
       allOf:
         - $ref: '#/components/schemas/RankingRow'

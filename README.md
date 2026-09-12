@@ -143,3 +143,15 @@ npm run build
 ```
 
 Contract changes must update `backend/api/openapi.yaml` and the typed frontend client together.
+
+Public rankings expose independent `pointsPerGameTrend` and `goalDifferenceTrend`
+states (`up`, `down`, `same`, `unavailable`) alongside the placement trend.
+All three use the snapshot before the newest included completed tournament with
+complete standings in the selected period, retaining earlier sections on the
+same Berlin day. Manual corrections effective on the newest tournament's Berlin
+calendar day belong only to the current snapshot. Higher metric values improve;
+PPG compares the commercially rounded integer hundredths shown to users, while
+goal difference compares exact integers. Missing before/after values or unknown
+or non-positive games make PPG unavailable, independently of goal difference.
+Trends are derived from source results and effective corrections, so client-side
+search/sort and unchanged repeated crawls cannot advance the comparison baseline.

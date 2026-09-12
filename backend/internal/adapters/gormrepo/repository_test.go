@@ -929,6 +929,9 @@ func TestYearRankingTrendDoesNotUsePriorCalendarYear(t *testing.T) {
 	if ranking[0].Trend != domain.RankingTrendNew {
 		t.Fatalf("2026 trend=%q, prior-year tournament must not be a baseline", ranking[0].Trend)
 	}
+	if ranking[0].PointsPerGameTrend != domain.MetricTrendUnavailable || ranking[0].GoalDifferenceTrend != domain.MetricTrendUnavailable {
+		t.Fatalf("prior-year tournament must not be a metric baseline: %+v", ranking[0])
+	}
 }
 
 func TestRankingTrendBaselineKeepsEarlierSameBerlinDaySectionRegardlessSyncOrder(t *testing.T) {

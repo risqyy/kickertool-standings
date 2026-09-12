@@ -131,6 +131,31 @@ func TestPublicRankingSerializesEveryTrendState(t *testing.T) {
 	}
 }
 
+func TestPublicRankingSerializesIndependentMetricTrends(t *testing.T) {
+	reader := periodRankingReader{ranking: []domain.PlayerAggregate{
+		{PlayerName: "Opposite", PointsPerGameTrend: domain.MetricTrendUp, GoalDifferenceTrend: domain.MetricTrendDown},
+		{PlayerName: "Neutral", PointsPerGameTrend: domain.MetricTrendSame, GoalDifferenceTrend: domain.MetricTrendUnavailable},
+		{PlayerName: "Fallback"},
+	}}
+	response := httptest.NewRecorder()
+	StripV1Prefix(NewPublicRankingAPIHandler(reader)).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/public/rankings", nil))
+	var payload struct {
+		Items []publicRankingRow `json:"items"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK || len(payload.Items) != 3 {
+		t.Fatalf("response=%s", response.Body.String())
+	}
+	for index, expected := range [][2]string{{"up", "down"}, {"same", "unavailable"}, {"unavailable", "unavailable"}} {
+		row := payload.Items[index]
+		if row.PointsPerGameTrend != expected[0] || row.GoalDifferenceTrend != expected[1] {
+			t.Fatalf("row=%+v want=%v", row, expected)
+		}
+	}
+}
+
 func TestVersionedPublicRankingEmptyAvailableYearsIsArray(t *testing.T) {
 	handler := StripV1Prefix(NewPublicRankingAPIHandler(periodRankingReader{availableYears: []int{}}))
 	response := httptest.NewRecorder()
