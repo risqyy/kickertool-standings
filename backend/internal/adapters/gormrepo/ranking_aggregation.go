@@ -38,10 +38,18 @@ func (r *Repository) listCurrentRanking(ctx context.Context, now time.Time) ([]d
 	return r.aggregateRankingRows(ctx, rows, corrections)
 }
 
-func (r *Repository) activeCorrections(ctx context.Context, now time.Time, year *int, before *time.Time) ([]ManualRankingCorrectionModel, error) {
+func (r *Repository) activeCorrections(ctx context.Context, now time.Time, year *int, before *time.Time, month ...int) ([]ManualRankingCorrectionModel, error) {
 	query := r.db.WithContext(ctx).Where("status = ? AND effective_date <= ?", manualCorrectionActive, now)
 	if year != nil {
 		query = query.Where("effective_year = ?", *year)
+	}
+	if year != nil && len(month) > 0 {
+		location, err := time.LoadLocation(domain.RankingLocation)
+		if err != nil {
+			return nil, fmt.Errorf("load ranking timezone: %w", err)
+		}
+		start := time.Date(*year, time.Month(month[0]), 1, 0, 0, 0, 0, location)
+		query = query.Where("effective_date >= ? AND effective_date < ?", start, start.AddDate(0, 1, 0))
 	}
 	if before != nil {
 		query = query.Where("effective_date < ?", *before)
@@ -201,8 +209,8 @@ func (r *Repository) aggregateRankingRows(ctx context.Context, rows []StandingMo
 
 // listRankingRowsForYear is shared by the public annual reader and tests. It
 // intentionally uses the same qualifying tournament rules as available years.
-func (r *Repository) listRankingRowsForYear(ctx context.Context, year int) ([]StandingModel, error) {
-	tournaments, err := r.qualifiedRankingTournaments(ctx, &year)
+func (r *Repository) listRankingRowsForYear(ctx context.Context, year int, month ...int) ([]StandingModel, error) {
+	tournaments, err := r.qualifiedRankingTournaments(ctx, &year, month...)
 	if err != nil {
 		return nil, err
 	}

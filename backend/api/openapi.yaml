@@ -19,15 +19,20 @@ paths:
             format: int32
             minimum: 1000
             maximum: 9999
+        - name: month
+          in: query
+          required: false
+          description: Calendar month in Europe/Berlin; requires year. Omit for the full year.
+          schema: { type: integer, minimum: 1, maximum: 12 }
       responses:
         '200':
-          description: Cumulative ranking when selectedYear is null; otherwise ranking from included completed tournaments in the selected calendar year.
+          description: Cumulative ranking when selectedYear is null; otherwise ranking from included completed tournaments and effective active corrections in the selected Berlin calendar year or month.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/RankingResponse'
         '400':
-          description: Invalid year query parameter.
+          description: Invalid year or month query parameter (month requires year).
         '500': { $ref: '#/components/responses/InternalError' }
   /api/standings:
     get:
@@ -346,7 +351,7 @@ components:
   schemas:
     RankingResponse:
       type: object
-      required: [items, lastSyncAt, lastSyncStatus, availableYears, selectedYear]
+      required: [items, lastSyncAt, lastSyncStatus, availableYears, selectedYear, availableMonths, selectedMonth]
       properties:
         items: { type: array, items: { $ref: '#/components/schemas/PublicRankingRow' } }
         lastSyncStatus:
@@ -363,6 +368,16 @@ components:
           description: Years with included, completed tournaments and complete standings, newest first.
           items: { type: integer, format: int32 }
         selectedYear: { type: integer, format: int32, nullable: true }
+        selectedMonth: { type: integer, minimum: 1, maximum: 12, nullable: true }
+        availableMonths:
+          type: array
+          description: Newest first; qualified tournament months and correction-only months that produce ranking entries.
+          items:
+            type: object
+            required: [year, month]
+            properties:
+              year: { type: integer, minimum: 1000, maximum: 9999 }
+              month: { type: integer, minimum: 1, maximum: 12 }
     RankingRow:
       type: object
       required: [rank, name, includedTournamentCount]

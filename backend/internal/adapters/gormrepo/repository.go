@@ -560,7 +560,7 @@ func (r *Repository) ListPlayerRankingForYear(ctx context.Context, year int) ([]
 
 // qualifiedRankingTournaments centralizes the inclusion/completion/standing
 // qualification shared by the available-year list and yearly values.
-func (r *Repository) qualifiedRankingTournaments(ctx context.Context, year *int) ([]TournamentModel, error) {
+func (r *Repository) qualifiedRankingTournaments(ctx context.Context, year *int, month ...int) ([]TournamentModel, error) {
 	var models []TournamentModel
 	query := r.db.WithContext(ctx).
 		Where("included_in_ranking = ?", true).
@@ -584,6 +584,9 @@ func (r *Repository) qualifiedRankingTournaments(ctx context.Context, year *int)
 			continue
 		}
 		if year != nil && model.Date.In(location).Year() != *year {
+			continue
+		}
+		if len(month) > 0 && int(model.Date.In(location).Month()) != month[0] {
 			continue
 		}
 		candidates = append(candidates, model)

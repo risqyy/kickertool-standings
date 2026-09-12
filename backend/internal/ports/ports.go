@@ -65,6 +65,12 @@ type PeriodRankingReader interface {
 	ListAvailableRankingYears(ctx context.Context) ([]int, error)
 }
 
+// MonthlyRankingReader adds calendar months without breaking annual readers.
+type MonthlyRankingReader interface {
+	ListPlayerRankingForMonth(ctx context.Context, year, month int) ([]domain.PlayerAggregate, error)
+	ListAvailableRankingMonths(ctx context.Context) ([]domain.RankingMonth, error)
+}
+
 // SnapshotRankingReader is used by audit/comparison views. The boundary is
 // exclusive: a correction effective exactly at the newest tournament belongs
 // to the current snapshot, not the immediately preceding one.

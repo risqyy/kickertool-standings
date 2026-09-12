@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { AlertCircle, ArrowDown, ArrowUp, ArrowUpDown, Minus, RefreshCw, Search } from 'lucide-react'
 import { getRankings } from '@/api/client'
-import type { RankingRow, RankingTrend } from '@/api/types'
+import type { RankingMonth, RankingRow, RankingTrend } from '@/api/types'
 import { Alert } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -13,7 +13,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { formatDecimal } from '@/lib/utils'
 
 type SortKey = 'rank' | 'name' | 'tournaments' | 'games' | 'points' | 'ppg' | 'goals'
-type RankingPeriod = number | null
+type RankingPeriod = { year: number; month?: number } | null
 type ColumnKey = SortKey | 'trend'
 type RankingColumn = { label: string; key: ColumnKey; align: string }
 
@@ -67,7 +67,10 @@ function compare(a: RankingRow, b: RankingRow, key: SortKey) {
 }
 
 function periodLabel(period: RankingPeriod) {
-  return period === null ? 'Ewigen Tabelle' : `Jahresrangliste ${period}`
+  if (period === null) return 'Ewigen Tabelle'
+  if (period.month === undefined) return `Jahresrangliste ${period.year}`
+  const month = new Intl.DateTimeFormat('de-DE', { month: 'long', timeZone: 'Europe/Berlin' }).format(new Date(Date.UTC(period.year, period.month - 1, 15)))
+  return `Monatsrangliste ${month} ${period.year}`
 }
 
 function formatWholePoints(value: string | null | undefined) {
@@ -120,6 +123,7 @@ export function RankingPage() {
   const [lastSync, setLastSync] = useState<string | null>(null)
   const [syncStatus, setSyncStatus] = useState<'ok' | 'never' | 'error'>('never')
   const [availableYears, setAvailableYears] = useState<number[]>([])
+  const [availableMonths, setAvailableMonths] = useState<RankingMonth[]>([])
   const [selectedPeriod, setSelectedPeriod] = useState<RankingPeriod>(null)
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [query, setQuery] = useState('')
@@ -129,13 +133,14 @@ export function RankingPage() {
   const load = useCallback((requestedPeriod: RankingPeriod) => {
     const generation = ++requestGeneration.current
     setStatus('loading')
-    void getRankings(requestedPeriod === null ? undefined : requestedPeriod).then(value => {
+    void getRankings(requestedPeriod?.year, requestedPeriod?.month).then(value => {
       if (generation !== requestGeneration.current) return
       setRows(value.items)
       setLastSync(value.lastSyncAt ?? null)
       setSyncStatus(value.lastSyncStatus ?? (value.lastSyncAt ? 'ok' : 'never'))
       setAvailableYears(Array.from(new Set(value.availableYears ?? [])).sort((a, b) => b - a))
-      setSelectedPeriod(value.selectedYear ?? requestedPeriod)
+      setAvailableMonths(value.availableMonths ?? [])
+      setSelectedPeriod(value.selectedYear == null ? requestedPeriod : { year: value.selectedYear, month: value.selectedMonth ?? undefined })
       setStatus('ready')
     }).catch(() => {
       if (generation === requestGeneration.current) setStatus('error')
@@ -150,8 +155,9 @@ export function RankingPage() {
   const filtered = useMemo(() => rows.filter(row => row.name.toLocaleLowerCase('de-DE').includes(query.toLocaleLowerCase('de-DE'))).sort((a, b) => compare(a, b, sort.key) * (sort.direction === 'asc' ? 1 : -1)), [rows, query, sort])
   const changeSort = (key: SortKey) => setSort(current => current.key === key ? { key, direction: current.direction === 'asc' ? 'desc' : 'asc' } : { key, direction: 'asc' })
   const changePeriod = (value: string) => {
-    const nextPeriod: RankingPeriod = value === '' ? null : Number(value)
-    if (nextPeriod !== null && !Number.isInteger(nextPeriod)) return
+    const [year, month] = value.split('-').map(Number)
+    const nextPeriod: RankingPeriod = value === '' ? null : { year, month: month || undefined }
+    if (nextPeriod !== null && (!Number.isInteger(year) || (month !== undefined && (!Number.isInteger(month) || month < 1 || month > 12)))) return
     setSelectedPeriod(nextPeriod)
     load(nextPeriod)
   }
@@ -178,9 +184,11 @@ export function RankingPage() {
           <div className="grid gap-3 sm:grid-cols-[minmax(11rem,0.8fr)_minmax(14rem,1fr)]">
             <div className="space-y-1.5">
               <label className="text-sm font-medium" htmlFor="ranking-period">Zeitraum</label>
-              <Select id="ranking-period" className="h-11 w-full" value={selectedPeriod === null ? '' : String(selectedPeriod)} onChange={event => changePeriod(event.target.value)}>
+              <Select id="ranking-period" className="h-11 w-full" value={selectedPeriod === null ? '' : selectedPeriod.month ? `${selectedPeriod.year}-${selectedPeriod.month}` : String(selectedPeriod.year)} onChange={event => changePeriod(event.target.value)}>
                 <option value="">Gesamtrangliste</option>
                 {availableYears.map(year => <option key={year} value={year}>Jahresrangliste {year}</option>)}
+                {availableMonths.map(period => <option key={`${period.year}-${period.month}`} value={`${period.year}-${period.month}`}>{periodLabel(period)}</option>)}
+                {selectedPeriod?.month !== undefined && !availableMonths.some(period => period.year === selectedPeriod.year && period.month === selectedPeriod.month) && <option value={`${selectedPeriod.year}-${selectedPeriod.month}`}>{activePeriodLabel}</option>}
               </Select>
             </div>
             <div className="space-y-1.5">
@@ -198,7 +206,7 @@ export function RankingPage() {
           {[1, 2, 3, 4, 5].map(item => <Skeleton key={item} className="h-12 w-full" />)}
         </div>}
         {status === 'error' && <Alert variant="destructive"><div className="flex items-start gap-3"><AlertCircle aria-hidden="true" /><div><p className="font-semibold">Rangliste konnte nicht geladen werden.</p><p className="mt-1">Zeitraum: {activePeriodLabel}</p><Button variant="outline" className="mt-3" onClick={() => load(selectedPeriod)}><RefreshCw aria-hidden="true" />Erneut versuchen</Button></div></div></Alert>}
-        {status === 'ready' && filtered.length === 0 && <div className="py-12 text-center text-muted-foreground">Keine passenden Spieler gefunden.</div>}
+        {status === 'ready' && filtered.length === 0 && <div className="py-12 text-center text-muted-foreground">{rows.length === 0 ? `Für den Zeitraum ${activePeriodLabel} liegen keine Ranking-Ergebnisse vor.` : 'Keine passenden Spieler gefunden.'}</div>}
         {status === 'ready' && filtered.length > 0 && <>
           <div className="hidden md:block"><Table><TableHeader><TableRow>{columns.map(column => <TableHead key={column.key} className={column.align} aria-sort={column.key === 'trend' ? 'none' : sort.key === column.key ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>{column.key === 'trend' ? <span className="inline-flex min-h-11 items-center px-2 font-medium">{column.label}</span> : <SortButton label={column.label} active={sort.key === column.key} direction={sort.direction} onClick={() => changeSort(column.key as SortKey)} />}</TableHead>)}</TableRow></TableHeader><TableBody>{filtered.map(row => <TableRow key={`${row.name}-${row.rank}`}>{columns.map(column => <TableCell key={column.key} className={`${column.align} ${column.key === 'name' ? 'font-medium' : 'tabular'}`}>{cellValue(row, column.key)}</TableCell>)}</TableRow>)}</TableBody></Table></div>
           <div className="grid gap-3 md:hidden">{filtered.map(row => <article key={`${row.name}-${row.rank}`} className="rounded-md border p-4" aria-label={`${row.name}, ${activePeriodLabel}`}><dl className="grid grid-cols-2 gap-3 text-sm">{columns.map(column => <div key={column.key} className={column.key === 'name' ? 'col-span-2' : ''}><dt className="text-muted-foreground">{column.label}</dt><dd className={`${column.align} ${column.key === 'name' ? 'font-medium' : 'tabular'}`}>{cellValue(row, column.key)}</dd></div>)}</dl></article>)}</div>

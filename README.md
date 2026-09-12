@@ -18,6 +18,12 @@ The versioned public endpoint is `GET /api/v1/public/rankings`. Admin JSON is un
 
 `GET /api/standings` remains the public JSON compatibility endpoint. `/` and `/standings` are frontend routes. The frontend calls relative `/api/*` URLs only; Vite proxies them to `localhost:8080` during development and production Nginx proxies them to the backend service. Nginx never lets SPA fallback handle `/api/*`, uses no-cache for `index.html`, long cache headers for hashed assets, a 1 MiB request limit, and bounded proxy timeouts.
 
+## Ranking periods
+
+The public ranking offers cumulative, annual and monthly periods. `GET /api/v1/public/rankings?year=2026&month=9` selects September 2026; omit `month` for the year or both parameters for the cumulative ranking. The response includes `selectedYear`, `selectedMonth`, `availableYears` and newest-first `availableMonths` (`{year, month}`). A month requires a year, with months 1–12. Valid empty periods return an empty ranking.
+
+Tournament dates and correction effective dates are assigned to calendar periods in Europe/Berlin. Only active, already effective corrections count; correction-only months are selectable when they create ranking entries. Periods share the existing completed-tournament, inclusion, player identity, merge and data-completeness rules. All values, including weighted PPG, are recomputed from the period’s source totals and corrections. Trends compare against the snapshot before the newest qualified tournament **within the selected period**; earlier same-day tournaments remain in the baseline, while corrections effective on the latest tournament day are current-only.
+
 ## Sources and synchronization
 
 Set `TOURNAMENT_SOURCE` to exactly `api` or `html`. API mode requires `TOURNAMENT_API_TOKEN` and uses Tournament.app Public API. HTML mode requires only the single `TOURNAMENT_HTML_URL` start URL and never receives the API token. Both sources produce the same normalized tournament/hierarchy/entry/player/standing model. Completed Monster DYP tournaments are the ranking scope; the crawler still loads and stores all discovered tournaments, independent of manual ranking inclusion.

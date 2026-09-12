@@ -8,9 +8,11 @@ describe('public rankings API', () => {
 
     await getRankings(2025)
     await getRankings()
+    await getRankings(2026, 9)
 
     expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/public/rankings?year=2025')
     expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/public/rankings')
+    expect(fetchMock.mock.calls[2][0]).toBe('/api/v1/public/rankings?year=2026&month=9')
   })
 })
 
