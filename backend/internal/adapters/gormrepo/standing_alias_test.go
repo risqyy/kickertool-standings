@@ -99,15 +99,15 @@ func TestMergedAliasCannotReplacePlayedResultWithZeroGames(t *testing.T) {
 }
 
 func TestLosingAliasIdentityConflictRollsBackCompleteSnapshot(t *testing.T) {
-	for _, foreignTournament := range []bool{false, true} {
-		t.Run(fmt.Sprintf("foreignTournament=%t", foreignTournament), func(t *testing.T) {
+	for _, mode := range []string{"foreign-id", "current-id", "foreign-key", "current-key"} {
+		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
 			repo, db := testRepo(t)
 			played := mergeStanding("cup", "played", "p1", "Full Name", 2400, 23, 0)
 			zero := mergeStanding("cup", "zero", "p2", "Short Name", 0, 0, 0)
 			other := mergeStanding("cup", "other-result", "p3", "Other Player", 500, 5, 2)
 			addMonthlyTournament(t, repo, "cup", "2026-09-10T18:00:00Z", played, zero, other)
-			if foreignTournament {
+			if strings.HasPrefix(mode, "foreign") {
 				other.TournamentID, other.StandingID, other.StandingKey = "other-cup", "foreign-result", "foreign-result"
 				addMonthlyTournament(t, repo, "other-cup", "2026-09-11T18:00:00Z", other)
 			}
@@ -138,6 +138,9 @@ func TestLosingAliasIdentityConflictRollsBackCompleteSnapshot(t *testing.T) {
 			changed.PointsCents = int64Pointer(9900)
 			zero.StandingID = other.StandingID
 			zero.StandingKey = other.StandingKey
+			if strings.HasSuffix(mode, "key") {
+				zero.StandingID = "unclaimed-source-id"
+			}
 			_, err := repo.UpsertStandingSnapshot(ctx, domain.StandingSnapshot{Source: played.Source, TournamentID: played.TournamentID, Complete: true, Standings: []domain.TournamentStanding{changed, zero}})
 			if err == nil || !strings.Contains(err.Error(), "ambiguous standing identity") {
 				t.Fatalf("invalid losing alias accepted: %v", err)
