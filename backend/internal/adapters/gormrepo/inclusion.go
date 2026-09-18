@@ -94,7 +94,7 @@ func (r *Repository) GetTournament(ctx context.Context, id uint) (domain.Tournam
 func (r *Repository) adminRow(ctx context.Context, model TournamentModel) (domain.TournamentAdminRow, error) {
 	var standings int64
 	var players int64
-	db := r.db.WithContext(ctx).Model(&StandingModel{}).Where("tournament_ref = ?", model.ID)
+	db := r.db.WithContext(ctx).Model(&StandingModel{}).Where("tournament_ref = ? AND superseded = ?", model.ID, false)
 	if err := db.Count(&standings).Error; err != nil {
 		return domain.TournamentAdminRow{}, fmt.Errorf("count tournament standings %d: %w", model.ID, err)
 	}
@@ -189,10 +189,10 @@ func (r *Repository) SetTournamentRankingInclusion(ctx context.Context, tourname
 func (r *Repository) adminRowTx(tx *gorm.DB, model TournamentModel) (domain.TournamentAdminRow, error) {
 	var standings int64
 	var players int64
-	if err := tx.Model(&StandingModel{}).Where("tournament_ref = ?", model.ID).Count(&standings).Error; err != nil {
+	if err := tx.Model(&StandingModel{}).Where("tournament_ref = ? AND superseded = ?", model.ID, false).Count(&standings).Error; err != nil {
 		return domain.TournamentAdminRow{}, err
 	}
-	if err := tx.Model(&StandingModel{}).Where("tournament_ref = ?", model.ID).Distinct("player_ref").Count(&players).Error; err != nil {
+	if err := tx.Model(&StandingModel{}).Where("tournament_ref = ? AND superseded = ?", model.ID, false).Distinct("player_ref").Count(&players).Error; err != nil {
 		return domain.TournamentAdminRow{}, err
 	}
 	return domain.TournamentAdminRow{Tournament: fromModel(model), StandingCount: int(standings), PlayerCount: int(players), StandingsComplete: model.StandingsSyncComplete, LastSyncError: model.LastStandingsSyncFailed, InclusionVersion: maxVersion(model.InclusionVersion)}, nil

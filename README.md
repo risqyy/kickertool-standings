@@ -38,6 +38,29 @@ Player identity is the normalized NFC name: trim, collapse all whitespace runs t
 
 ## Refresh one tournament
 
+A complete standings snapshot is authoritative for that tournament's current
+results. Rows missing from it are retained as obsolete source records and no
+longer contribute to rankings or current tournament row counts. Reappearing rows
+become current again. This also repairs duplicate contributions caused by renamed
+HTML results with name-derived IDs, on the next successful complete refresh.
+Incomplete or failed refreshes never retire rows. Both the previous and current
+player aggregates are recalculated when a stable result changes its player name.
+
+Explicitly **0 games** means non-participation: that source row contributes no
+tournament, points, games, or goal difference. A missing games value stays unknown
+and retains the existing completeness rules. Overall, year, month, trend and admin
+player aggregates share this rule. Tournaments with only non-participation or
+obsolete results do not define ranking periods or the latest trend boundary.
+Independent manual corrections still apply. Source rows and player identities
+remain available for administration; a source name correction does not implicitly
+rename other tournaments or merge people based on reused external IDs. Use an
+explicit player merge when older results under another name belong to the same
+person.
+
+Existing databases gain the obsolete marker automatically, initially false.
+Known zero-game rows are excluded immediately by ranking readers; historical
+name duplicates are reconciled when their tournament next completes a refresh.
+
 In **Admin → Turniere**, choose **Ergebnisse neu laden** on the tournament row or
 mobile card. **Liste neu laden** only reloads the displayed list. The result action
 fetches that stored tournament's standings from the configured source, including

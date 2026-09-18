@@ -455,6 +455,7 @@ func aggregateForPlayerTxWithout(tx *gorm.DB, player PlayerModel, excludedCorrec
 	if err := tx.Joins("JOIN tournament_models ON tournament_models.id = standing_models.tournament_ref").Where("standing_models.player_ref = ? AND tournament_models.included_in_ranking = ?", player.ID, true).Find(&rows).Error; err != nil {
 		return domain.PlayerAggregate{}, err
 	}
+	rows = contributingStandings(rows)
 	var corrections []ManualRankingCorrectionModel
 	correctionQuery := tx.Where("player_ref = ? AND status = ?", player.ID, manualCorrectionActive)
 	if len(cutoffs) > 0 && !cutoffs[0].IsZero() {

@@ -436,11 +436,12 @@ components:
               month: { type: integer, minimum: 1, maximum: 12 }
     RankingRow:
       type: object
+      description: Only current source results contribute. Explicit zero-game entries contribute no tournament or metrics; missing games remain unknown. Effective manual corrections apply independently.
       required: [rank, name, includedTournamentCount]
       properties:
         rank: { type: integer }
         name: { type: string }
-        includedTournamentCount: { type: integer }
+        includedTournamentCount: { type: integer, description: Distinct contributing tournaments plus effective manual count corrections. }
         gamesPlayed: { type: integer, nullable: true }
         totalPoints: { type: string, pattern: '^-?\d+\.\d{2}$', nullable: true }
         pointsPerGame: { type: string, pattern: '^-?\d+\.\d{2}$', nullable: true }

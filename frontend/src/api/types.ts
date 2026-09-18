@@ -9,6 +9,7 @@ export interface RankingRow {
   pointsPerGameTrend: MetricTrend
   goalDifferenceTrend: MetricTrend
   name: string
+  /** Current source results excluding explicit zero-game entries, plus effective manual count corrections. */
   includedTournamentCount: number
   gamesPlayed: Nullable<number>
   totalPoints: Nullable<string>

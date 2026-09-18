@@ -175,6 +175,7 @@ func (r *Repository) aggregateForPlayer(ctx context.Context, player PlayerModel)
 }
 
 func aggregateFromRows(rows []StandingModel, player PlayerModel) (domain.PlayerAggregate, error) {
+	rows = contributingStandings(rows)
 	result := domain.PlayerAggregate{PlayerKey: player.CanonicalNameKey, PlayerName: player.DisplayName, RecalculatedAt: player.UpdatedAt}
 	if len(rows) == 0 {
 		return result, nil

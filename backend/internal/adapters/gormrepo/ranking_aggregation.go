@@ -62,6 +62,7 @@ func (r *Repository) activeCorrections(ctx context.Context, now time.Time, year 
 }
 
 func (r *Repository) aggregateRankingRows(ctx context.Context, rows []StandingModel, corrections []ManualRankingCorrectionModel) ([]domain.PlayerAggregate, error) {
+	rows = contributingStandings(rows)
 	playerIDs := make(map[uint]struct{}, len(rows)+len(corrections))
 	for _, row := range rows {
 		playerIDs[row.PlayerRef] = struct{}{}
