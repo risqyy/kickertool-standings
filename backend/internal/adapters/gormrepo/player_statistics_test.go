@@ -90,6 +90,9 @@ func TestPlayerStatisticsExplainSourceRowsAndIndependentCorrections(t *testing.T
 		}
 	}
 	// Keep missing metadata visible, without changing its eligibility.
+	if err := db.Model(&StandingModel{}).Where("tournament_id = ?", "first").Update("url", "").Error; err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Model(&TournamentModel{}).Where("source_id = ?", "first").Updates(map[string]any{"name": "", "date": nil, "url": ""}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -144,5 +147,50 @@ func TestPlayerStatisticsExplainSourceRowsAndIndependentCorrections(t *testing.T
 	}
 	if stats.Tournaments[0].SourceID != "unknown" || stats.Tournaments[0].TotalPointsCents != nil || stats.Tournaments[0].Reason != "counted" {
 		t.Fatalf("unknown source row=%+v", stats.Tournaments[0])
+	}
+}
+
+func TestPlayerStatisticsPreserveStoredStandingOriginAfterMerge(t *testing.T) {
+	ctx := context.Background()
+	repo, db := testRepo(t)
+	rank := 6
+	row := mergeStanding("origin", "external-result", "source-player", "Source Name", 1000, 23, 8)
+	row.Rank = &rank
+	row.URL = "https://example.test/tournament/groups/final/standings"
+	addMonthlyTournament(t, repo, "origin", "2026-09-10T18:00:00Z", row)
+	var source PlayerModel
+	if err := db.Where("canonical_name_key = ?", domain.PlayerKey("Source Name")).First(&source).Error; err != nil {
+		t.Fatal(err)
+	}
+	target, err := repo.CreateManualPlayer(ctx, domain.PlayerCreationInput{DisplayName: "Canonical Name", Administrator: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.MergePlayers(ctx, source.ID, target.Player.ID, domain.PlayerMergeOptions{Actor: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := repo.GetPlayerStatistics(ctx, source.ID)
+	if err != nil || len(stats.Tournaments) != 1 {
+		t.Fatalf("statistics=%+v error=%v", stats, err)
+	}
+	got := stats.Tournaments[0]
+	if stats.Player.DisplayName != "Canonical Name" || got.SourcePlayerName != "Source Name" || got.StandingRank == nil || *got.StandingRank != 6 || got.StandingSourceID == nil || *got.StandingSourceID != "external-result" || got.StandingKey != "external-result" || got.URL != row.URL {
+		t.Fatalf("lost source provenance: %+v", got)
+	}
+	// Older source records can lack rank/result ID/name; never synthesize them.
+	// Retain the stored key and use the tournament URL only without a row URL.
+	if err := db.Model(&StandingModel{}).Where("id = ?", got.ID).Updates(map[string]any{"rank": nil, "source_standing_id": nil, "player_name": "", "url": "", "games_played": 0}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&TournamentModel{}).Where("id = ?", got.TournamentID).Update("url", "https://example.test/tournament").Error; err != nil {
+		t.Fatal(err)
+	}
+	stats, err = repo.GetPlayerStatistics(ctx, target.Player.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = stats.Tournaments[0]
+	if got.Reason != "zero_games" || got.StandingRank != nil || got.StandingSourceID != nil || got.SourcePlayerName != "" || got.StandingKey != "external-result" || got.URL != "https://example.test/tournament" {
+		t.Fatalf("unknown/non-counted provenance changed: %+v", got)
 	}
 }

@@ -111,7 +111,16 @@ func (r *Repository) GetPlayerStatistics(ctx context.Context, id uint) (result d
 			case row.GamesPlayed != nil && *row.GamesPlayed == 0:
 				reason = "zero_games"
 			}
-			item := domain.PlayerTournamentContribution{ID: row.ID, TournamentID: row.TournamentRef, Name: name, Date: tournament.Date, Source: row.Source, SourceID: sourceID, URL: tournament.URL, Status: tournament.Status, Reason: reason, GamesPlayed: row.GamesPlayed, TotalPointsCents: row.PointsCents, GoalDifference: row.GoalDifference}
+			url := row.URL
+			if strings.TrimSpace(url) == "" {
+				url = tournament.URL
+			}
+			item := domain.PlayerTournamentContribution{
+				ID: row.ID, TournamentID: row.TournamentRef, Name: name, Date: tournament.Date,
+				Source: row.Source, SourceID: sourceID, URL: url, Status: tournament.Status, Reason: reason,
+				StandingRank: row.Rank, StandingSourceID: row.SourceStandingID, StandingKey: row.StandingKey, SourcePlayerName: row.PlayerName,
+				GamesPlayed: row.GamesPlayed, TotalPointsCents: row.PointsCents, GoalDifference: row.GoalDifference,
+			}
 			if row.GamesPlayed != nil && *row.GamesPlayed > 0 && row.PointsCents != nil {
 				ppg := roundCents(*row.PointsCents, int64(*row.GamesPlayed))
 				item.PointsPerGameCents = &ppg

@@ -327,6 +327,7 @@ func (s *Source) FetchStandings(ctx context.Context, tournament domain.Tournamen
 		tablesFound += document.TablesFound
 		meta = mergeStandingsMeta(meta, document.Meta)
 		for _, row := range document.Rows {
+			row.URL = resolvedURL
 			key := row.StandingID
 			if key == "" {
 				key = row.StandingKey
@@ -383,7 +384,6 @@ func (s *Source) FetchStandings(ctx context.Context, tournament domain.Tournamen
 		row.DisciplineID = disciplineID
 		row.StageID = stageID
 		row.Group = groupID
-		row.URL = finalURL
 		row.PlayerKey = domain.PlayerKey(row.PlayerName)
 		if row.StandingID == "" {
 			row.StandingID = fallbackID(tournament.SourceID, row.PlayerName, row.Rank)

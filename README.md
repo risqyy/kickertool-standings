@@ -64,6 +64,16 @@ Existing databases gain the obsolete marker automatically, initially false.
 Known zero-game rows are excluded immediately by ranking readers; historical
 name duplicates are reconciled when their tournament next completes a refresh.
 
+When multiple source names have been manually merged into one player, a complete
+refresh selects one source result for that player and tournament. A played or
+unknown-games result takes precedence over an explicit zero-games alias; the
+canonical source name and then a stable key settle remaining ties. The two rows
+are never added together. A successful complete refresh repairs earlier cases
+where a zero-games alias overwrote a played result. A later complete snapshot
+containing only zero games still updates the player to non-participation; unknown
+games remain unknown. Manual merges also prefer participation over an explicit
+zero-games result, retaining the target result for other current-row collisions.
+
 In **Admin → Turniere**, choose **Ergebnisse neu laden** on the tournament row or
 mobile card. **Liste neu laden** only reloads the displayed list. The result action
 fetches that stored tournament's standings from the configured source, including
@@ -190,6 +200,13 @@ are shown as unknown, never as zero. Manual corrections are listed separately
 with their effective date, deltas, reason and effective, scheduled, revoked or
 replaced state. Points per game are calculated from total points and games, not
 by adding or averaging the individual tournament ratios.
+
+Every contribution also identifies its stored **Standing-Platz (Quelle)**, original
+source player name, source result ID and standing key, including non-counted rows.
+These identify the source result, independently of the current overall placement
+or canonical player name after a merge. Missing provenance is shown as **Unbekannt**;
+positions are never inferred from row order. The source link uses the stored
+result-page URL, falling back to the tournament page for older rows without one.
 
 A merged identity links to its canonical player and displays that player's
 combined statistics. Totals, source rows and corrections use one database read

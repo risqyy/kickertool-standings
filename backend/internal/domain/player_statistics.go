@@ -30,6 +30,10 @@ type PlayerTournamentContribution struct {
 	Date               *time.Time `json:"date"`
 	Source             string     `json:"source"`
 	SourceID           string     `json:"sourceId"`
+	StandingRank       *int       `json:"standingRank"`
+	StandingSourceID   *string    `json:"standingSourceId"`
+	StandingKey        string     `json:"standingKey"`
+	SourcePlayerName   string     `json:"sourcePlayerName"`
 	URL                string     `json:"url"`
 	Status             string     `json:"status"`
 	Reason             string     `json:"reason"`

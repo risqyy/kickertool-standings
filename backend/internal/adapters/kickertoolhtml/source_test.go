@@ -387,6 +387,9 @@ func TestSourceDiscoversSeparateStandingsAndDynamicJSONEndpoint(t *testing.T) {
 	}
 	playerOneRows := 0
 	for _, row := range snapshot.Standings {
+		if !strings.Contains(row.URL, "/groups/g1/standings") && !strings.Contains(row.URL, "/xhr/t3/group/g1/standings.json") {
+			t.Fatalf("selected result lost its actual source page: %s", row.URL)
+		}
 		if row.PlayerKey == domain.PlayerKey("Player One") {
 			playerOneRows++
 		}
