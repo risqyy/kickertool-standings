@@ -1,4 +1,5 @@
 import type { CreatePlayerResponse, Dashboard, ManualRankingCorrectionChange, ManualRankingCorrectionListResponse, ManualRankingCorrectionPreview, ManualRankingCorrectionRevocationResponse, MergeResult, Player, PlayerMergeAudit, PlayerMergeUndoPreview, PlayerMergeUndoResult, RankingsResponse, TournamentPage, TournamentRefreshJob } from './types'
+import type { PlayerPage, PlayerStatistics } from './types'
 
 export class ApiError extends Error {
   status: number
@@ -67,6 +68,16 @@ export async function setTournamentInclusion(csrf: string, id: number, included:
 export async function searchPlayers(query: string) {
   const value = await request<{ items: Player[]; message?: string }>('/api/v1/admin/players/search?' + new URLSearchParams({ q: query }))
   return value.items
+}
+
+export interface PlayerQuery { q?: string; state?: 'all' | 'active' | 'merged'; page?: number; limit?: number }
+export async function getPlayers(query: PlayerQuery) {
+  const search = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) if (value !== undefined && value !== '') search.set(key, String(value))
+  return request<PlayerPage>('/api/v1/admin/players?' + search)
+}
+export async function getPlayerStatistics(id: number) {
+  return request<PlayerStatistics>('/api/v1/admin/players/' + id + '/statistics')
 }
 
 export async function createPlayer(csrf: string, displayName: string) {

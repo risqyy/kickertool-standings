@@ -237,3 +237,41 @@ export interface TournamentRefreshJob {
   startedAt: string
   finishedAt: Nullable<string>
 }
+
+export interface PlayerSummary {
+  id: number
+  displayName: string
+  active: boolean
+  mergedIntoPlayerId: Nullable<number>
+}
+
+export interface PlayerPage {
+  items: PlayerSummary[]
+  page: number
+  limit: number
+  total: number
+}
+
+export interface PlayerTournamentContribution {
+  id: number
+  tournamentId: number
+  name: string
+  date: Nullable<string>
+  source: string
+  sourceId: string
+  url: string
+  status: string
+  reason: 'counted' | 'excluded' | 'zero_games' | 'superseded'
+  gamesPlayed: Nullable<number>
+  totalPointsCents: Nullable<number>
+  pointsPerGameCents: Nullable<number>
+  goalDifference: Nullable<number>
+}
+
+export interface PlayerStatistics {
+  requestedPlayer: PlayerSummary
+  player: Player
+  tournaments: PlayerTournamentContribution[]
+  corrections: { correction: ManualRankingCorrection; effective: boolean }[]
+  computedAt: string
+}
