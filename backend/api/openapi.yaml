@@ -175,6 +175,25 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
   /api/v1/admin/players:
+    get:
+      security: [{ basicAuth: [] }]
+      operationId: listAdminPlayers
+      description: Lists every stored identity, including empty manual players and merged identities. Name and alias search uses literal normalized substrings. Ordered by canonical name, then ID.
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: state, in: query, schema: { type: string, enum: [all, active, merged], default: all } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 1000000, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+      responses:
+        '200':
+          description: Player page from a consistent read snapshot.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerPage' }
+        '400': { description: Invalid filter or pagination. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { description: Player statistics repository unavailable. }
     post:
       security: [{ basicAuth: [] }]
       operationId: createManualPlayer
@@ -203,6 +222,24 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ManualPlayerConflictResponse' }
         '500': { $ref: '#/components/responses/InternalError' }
+  /api/v1/admin/players/{id}/statistics:
+    get:
+      security: [{ basicAuth: [] }]
+      operationId: getAdminPlayerStatistics
+      description: Overall canonical player totals, retained source rows and manual correction history from one database snapshot and time boundary. Merged identities resolve to their canonical player; requestedPlayer preserves the requested identity. No source crawl is performed.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      responses:
+        '200':
+          description: Current aggregate with explanatory source values. Only counted tournament rows and effective corrections contribute; nullable metrics remain unknown.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlayerStatistics' }
+        '400': { description: Invalid player ID. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { description: Player statistics repository unavailable. }
   /api/v1/admin/players/search:
     get:
       security: [{ basicAuth: [] }]
@@ -507,6 +544,57 @@ components:
         date: { type: string, format: date-time, nullable: true }
         includedInRanking: { type: boolean }
         inclusionVersion: { type: integer, format: int64 }
+    PlayerSummary:
+      type: object
+      required: [id, displayName, active, mergedIntoPlayerId]
+      properties:
+        id: { type: integer }
+        displayName: { type: string }
+        active: { type: boolean, description: False for merged identities. }
+        mergedIntoPlayerId: { type: integer, nullable: true }
+    PlayerPage:
+      type: object
+      required: [items, page, limit, total]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/PlayerSummary' } }
+        page: { type: integer }
+        limit: { type: integer }
+        total: { type: integer, format: int64 }
+    PlayerTournamentContribution:
+      type: object
+      description: Retained source row, ordered by date descending (unknown dates last), tournament ID descending, then row ID descending. Metrics are source values even for non-counted rows. Superseded takes precedence over excluded, then zero_games. Archived obsolete identity collisions are not a complete revision history in this response.
+      required: [id, tournamentId, name, date, source, sourceId, url, status, reason, gamesPlayed, totalPointsCents, pointsPerGameCents, goalDifference]
+      properties:
+        id: { type: integer, description: Standing row ID. }
+        tournamentId: { type: integer }
+        name: { type: string, description: Falls back to the internal tournament ID when unnamed. }
+        date: { type: string, format: date-time, nullable: true }
+        source: { type: string }
+        sourceId: { type: string }
+        url: { type: string, description: HTTP(S) source URL without credentials; empty when unavailable or unsafe. }
+        status: { type: string }
+        reason: { type: string, enum: [counted, excluded, zero_games, superseded] }
+        gamesPlayed: { type: integer, nullable: true }
+        totalPointsCents: { type: integer, format: int64, nullable: true }
+        pointsPerGameCents: { type: integer, format: int64, nullable: true, description: Rounded source points per game; unknown for missing or non-positive games. }
+        goalDifference: { type: integer, nullable: true }
+    PlayerStatistics:
+      type: object
+      required: [requestedPlayer, player, tournaments, corrections, computedAt]
+      properties:
+        requestedPlayer: { $ref: '#/components/schemas/PlayerSummary' }
+        player: { $ref: '#/components/schemas/Player' }
+        tournaments: { type: array, items: { $ref: '#/components/schemas/PlayerTournamentContribution' } }
+        corrections:
+          type: array
+          description: Canonical player's complete correction history, ordered by effective date descending then ID descending.
+          items:
+            type: object
+            required: [correction, effective]
+            properties:
+              correction: { $ref: '#/components/schemas/ManualRankingCorrection' }
+              effective: { type: boolean, description: True only for active corrections effective at computedAt. Active future corrections are scheduled. }
+        computedAt: { type: string, format: date-time }
     Player:
       type: object
       required: [id, displayName, canonicalNameKey, createdAt, createdBy, origin, aliases, active, tournamentCount, gamesPlayed, totalPointsCents, pointsPerGameCents, goalDifference, rankingCorrectionVersion]

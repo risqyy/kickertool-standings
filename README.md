@@ -176,6 +176,32 @@ docker pull ghcr.io/risqyy/kickertool-standings-frontend:v1.0.3
 
 GHCR package visibility and repository linkage are managed in GitHub. The images contain no local `.env`, API token, admin credential, database, or club-specific configuration; provide deployment configuration at runtime.
 
+## Admin player statistics
+
+Open **Admin → Spieler** to browse all stored player identities, including
+empty manual players and merged identities. Search includes aliases; the state
+filter and pagination are retained in the URL. Click a name to open its separate
+statistics page, which also supports direct links at `/admin/players/{id}`.
+
+The page shows overall totals and the source values for each retained tournament
+row. Only rows marked **Gewertet** contribute. Excluded tournaments, explicit
+zero-game entries and superseded results remain distinguishable. Missing values
+are shown as unknown, never as zero. Manual corrections are listed separately
+with their effective date, deltas, reason and effective, scheduled, revoked or
+replaced state. Points per game are calculated from total points and games, not
+by adding or averaging the individual tournament ratios.
+
+A merged identity links to its canonical player and displays that player's
+combined statistics. Totals, source rows and corrections use one database read
+snapshot and one time boundary; opening the page never triggers a crawl. This
+explains the current aggregate, not every historical revision: obsolete rows
+archived to resolve source identity collisions are retained in the database but
+are not presented as additional contributions.
+
+Protected read endpoints are `GET /api/v1/admin/players` and
+`GET /api/v1/admin/players/{id}/statistics`; their typed frontend client and public
+OpenAPI contract are maintained together.
+
 ## Verification
 
 ```powershell
@@ -193,7 +219,7 @@ npm run build
 
 Contract changes must update `backend/api/openapi.yaml` and the typed frontend client together.
 
-Public and single-tournament refresh browser regressions can run without backend credentials or a database:
+Public ranking, single-tournament refresh and admin player-statistics browser regressions can run without backend credentials or a database:
 `cd frontend` then `npx playwright test --config playwright.public.config.ts`.
 They exercise monthly selection, independent metric trends, synchronization
 status, search, sorting, admin refresh success/failure/retry, and desktop/mobile layouts with fixed API fixtures.
