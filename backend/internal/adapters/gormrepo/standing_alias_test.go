@@ -117,3 +117,65 @@ func TestMergedAliasUnknownGamesAreNotTreatedAsZero(t *testing.T) {
 		t.Fatalf("unknown collapsed to zero: %+v %v", p, err)
 	}
 }
+
+func TestMergedPlayedAliasesKeepCanonicalResultAndCanUndo(t *testing.T) {
+	ctx := context.Background()
+	repo, db := testRepo(t)
+	alias := mergeStanding("played-alias", "z-alias", "p1", "Old Name", 9000, 30, 20)
+	canonical := mergeStanding("played-alias", "a-canonical", "p2", "Current Name", 400, 4, 2)
+	addMonthlyTournament(t, repo, "played-alias", "2026-09-10T18:00:00Z", alias, canonical)
+	var source, target PlayerModel
+	if err := db.Where("canonical_name_key = ?", domain.PlayerKey(alias.PlayerName)).First(&source).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Where("canonical_name_key = ?", domain.PlayerKey(canonical.PlayerName)).First(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.MergePlayers(ctx, source.ID, target.ID, domain.PlayerMergeOptions{Actor: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := repo.UpsertStandingSnapshot(ctx, domain.StandingSnapshot{Source: alias.Source, TournamentID: alias.TournamentID, Complete: true, Standings: []domain.TournamentStanding{canonical, alias}}); err != nil {
+			t.Fatal(err)
+		}
+		profile, err := repo.GetPlayerProfile(ctx, target.ID)
+		if err != nil || *profile.Aggregate.GamesPlayed != 4 || *profile.Aggregate.TotalPointsCents != 400 {
+			t.Fatalf("duplicate played aliases summed or selected by magnitude: %+v %v", profile, err)
+		}
+	}
+	// Refresh touches timestamps, so use a fresh merge to exercise zero-game
+	// replacement and its undo snapshot without unrelated concurrent changes.
+	if _, err := repo.UpsertStandingSnapshot(ctx, mergeSnapshot(canonical)); err != nil {
+		t.Fatal(err)
+	}
+	zero := mergeStanding("played-alias", "empty-target", "p3", "Empty Target", 0, 0, 0)
+	if _, err := repo.UpsertStandingSnapshot(ctx, domain.StandingSnapshot{Source: zero.Source, TournamentID: zero.TournamentID, Complete: true, Standings: []domain.TournamentStanding{canonical, zero}}); err != nil {
+		t.Fatal(err)
+	}
+	var empty PlayerModel
+	if err := db.Where("canonical_name_key = ?", domain.PlayerKey(zero.PlayerName)).First(&empty).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.MergePlayers(ctx, target.ID, empty.ID, domain.PlayerMergeOptions{Actor: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	merges, err := repo.ListPlayerMerges(ctx)
+	if err != nil || len(merges) != 2 {
+		t.Fatalf("merges=%+v %v", merges, err)
+	}
+	preview, err := repo.PreviewPlayerMergeUndo(ctx, merges[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.UndoPlayerMerge(ctx, merges[0].ID, domain.PlayerMergeUndoOptions{Actor: "test", ExpectedFingerprint: preview.StateFingerprint}); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := repo.GetPlayerProfile(ctx, target.ID)
+	if err != nil || *profile.Aggregate.GamesPlayed != 4 {
+		t.Fatalf("undo lost played result: %+v %v", profile, err)
+	}
+	profile, err = repo.GetPlayerProfile(ctx, empty.ID)
+	if err != nil || profile.Aggregate.TournamentCount != 0 {
+		t.Fatalf("undo gave empty target a contribution: %+v %v", profile, err)
+	}
+}
