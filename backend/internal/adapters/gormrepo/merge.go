@@ -234,9 +234,11 @@ func transferStandingRows(tx *gorm.DB, source, target PlayerModel, result *domai
 				return nil, fmt.Errorf("deduplicate standing %d: %w", row.ID, err)
 			}
 			result.DeduplicatedAllocations++
-			// The current source result must win over an obsolete target row.
-			// Keep the target identity and let allocation transfer run normally.
-			if collision.Superseded && !row.Superseded {
+			// Current results outrank obsolete records. With equally current
+			// rows, non-participation cannot displace a played/unknown result.
+			// Other collisions keep the existing target-wins merge policy.
+			if (collision.Superseded && !row.Superseded) ||
+				(collision.Superseded == row.Superseded && explicitZeroGames(collision.GamesPlayed) && !explicitZeroGames(row.GamesPlayed)) {
 				row.PlayerRef, row.PlayerKey = target.ID, target.CanonicalNameKey
 				if err := tx.Model(&collision).Updates(standingUpdates(&row)).Error; err != nil {
 					return nil, fmt.Errorf("replace obsolete merge target standing: %w", err)

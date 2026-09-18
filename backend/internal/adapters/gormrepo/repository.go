@@ -708,7 +708,11 @@ func (r *Repository) UpsertStandingSnapshot(ctx context.Context, snapshot domain
 		for _, row := range previous {
 			touched[row.PlayerKey] = struct{}{}
 		}
-		seen := make([]uint, 0, len(standings))
+		// Resolve aliases before writing any result: several source names may
+		// now belong to one manually merged player. Sequential upserts would
+		// otherwise let the last alias overwrite the selected tournament result.
+		selected := make(map[string]domain.TournamentStanding)
+		players := make(map[string]PlayerModel)
 		for _, standing := range standings {
 			standing.PlayerKey = domain.PlayerKey(standing.PlayerName)
 			if err := validateStanding(standing, snapshot); err != nil {
@@ -724,10 +728,25 @@ func (r *Repository) UpsertStandingSnapshot(ctx context.Context, snapshot domain
 			standing.PlayerKey = player.CanonicalNameKey
 			touched[standing.PlayerKey] = struct{}{}
 			standing.LastSeenAt = now
-			standingModel := toStandingModel(standing, tournament.ID, player.ID)
 			if err := bindAllocationsToPlayer(tx, snapshot.Source, standing, player.ID); err != nil {
 				return err
 			}
+			current, exists := selected[standing.PlayerKey]
+			if !exists || preferAliasStanding(standing, current, player.CanonicalNameKey) {
+				selected[standing.PlayerKey] = standing
+			}
+			players[standing.PlayerKey] = player
+		}
+		standings = standings[:0]
+		for _, standing := range selected {
+			standings = append(standings, standing)
+		}
+		sort.SliceStable(standings, func(i, j int) bool { return standings[i].StandingKey < standings[j].StandingKey })
+		seen := make([]uint, 0, len(standings))
+		for _, standing := range standings {
+			player := players[standing.PlayerKey]
+			now := standing.LastSeenAt
+			standingModel := toStandingModel(standing, tournament.ID, player.ID)
 			existing, findErr := findStanding(tx, standing, now)
 			if errors.Is(findErr, gorm.ErrRecordNotFound) {
 				if createErr := tx.Create(standingModel).Error; createErr != nil {
