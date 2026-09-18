@@ -1,4 +1,4 @@
-import type { CreatePlayerResponse, Dashboard, ManualRankingCorrectionChange, ManualRankingCorrectionListResponse, ManualRankingCorrectionPreview, ManualRankingCorrectionRevocationResponse, MergeResult, Player, PlayerMergeAudit, PlayerMergeUndoPreview, PlayerMergeUndoResult, RankingsResponse, TournamentPage } from './types'
+import type { CreatePlayerResponse, Dashboard, ManualRankingCorrectionChange, ManualRankingCorrectionListResponse, ManualRankingCorrectionPreview, ManualRankingCorrectionRevocationResponse, MergeResult, Player, PlayerMergeAudit, PlayerMergeUndoPreview, PlayerMergeUndoResult, RankingsResponse, TournamentPage, TournamentRefreshJob } from './types'
 
 export class ApiError extends Error {
   status: number
@@ -119,4 +119,11 @@ export async function confirmManualCorrection(csrf: string, token: string, expec
 }
 export async function revokeManualCorrection(csrf: string, playerId: number, correctionId: number, expectedVersion: number, reason: string) {
 	return adminMutation<ManualRankingCorrectionRevocationResponse>('/api/v1/admin/players/' + playerId + '/corrections/' + correctionId + '/revoke', csrf, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedVersion, reason, confirmed: true }) })
+}
+
+export async function startTournamentRefresh(csrf: string, id: number) {
+  return adminMutation<TournamentRefreshJob>('/api/v1/admin/tournaments/' + id + '/refresh', csrf, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+}
+export async function getTournamentRefresh(id: string) {
+  return request<TournamentRefreshJob>('/api/v1/admin/tournament-refreshes/' + encodeURIComponent(id))
 }

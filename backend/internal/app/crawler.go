@@ -22,6 +22,7 @@ type CrawlerService struct {
 	syncStatusRepo    ports.CrawlSyncStatusRepository
 	clock             ports.Clock
 	logger            *zerolog.Logger
+	syncGate          chan struct{}
 }
 
 type CrawlerOption func(*CrawlerService)
@@ -39,7 +40,7 @@ func WithStandings(source ports.TournamentStandingSource, repo ports.StandingRep
 }
 
 func NewCrawler(source ports.TournamentSource, repo ports.TournamentRepository, clock ports.Clock, logger *zerolog.Logger, options ...CrawlerOption) *CrawlerService {
-	crawler := &CrawlerService{source: source, repo: repo, clock: clock, logger: logger}
+	crawler := &CrawlerService{source: source, repo: repo, clock: clock, logger: logger, syncGate: make(chan struct{}, 1)}
 	if statusRepo, ok := repo.(ports.CrawlSyncStatusRepository); ok {
 		crawler.syncStatusRepo = statusRepo
 	}
@@ -50,6 +51,12 @@ func NewCrawler(source ports.TournamentSource, repo ports.TournamentRepository, 
 }
 
 func (c *CrawlerService) Crawl(ctx context.Context) (result domain.SyncResult, err error) {
+	select {
+	case c.syncGate <- struct{}{}:
+		defer func() { <-c.syncGate }()
+	case <-ctx.Done():
+		return result, ctx.Err()
+	}
 	result.StartedAt = c.clock.Now()
 	sourceName := "crawler"
 	if named, ok := c.source.(ports.NamedTournamentSource); ok {

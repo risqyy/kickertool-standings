@@ -228,3 +228,11 @@ export interface PlayerMergeUndoResult {
   targetAfter: MergeAggregate
   undoneAt: string
 }
+
+export interface TournamentRefreshJob {
+  id: string
+  tournamentId: number
+  state: 'running' | 'succeeded' | 'failed'
+  startedAt: string
+  finishedAt: Nullable<string>
+}

@@ -96,6 +96,62 @@ paths:
               schema:
                 $ref: '#/components/schemas/TournamentPage'
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/admin/tournaments/{id}/refresh:
+    post:
+      operationId: startTournamentRefresh
+      security: [{ basicAuth: [] }]
+      description: >-
+        Start a background standings refresh for this stored tournament, bypassing
+        finalization and the daily recheck interval. Does not run discovery or
+        advance the global successful-crawl timestamp. Existing complete results
+        survive failed or incomplete attempts. Shares the regular crawler lock.
+        Requires a JSON Content-Type, the session CSRF cookie and matching header,
+        and a same-origin Origin header when supplied.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+        - { name: X-CSRF-Token, in: header, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+            example: {}
+      responses:
+        '202':
+          description: Accepted. Poll the returned job ID; the job outlives this request and has a ten-minute deadline.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TournamentRefreshJob' }
+        '400': { description: Invalid tournament ID or non-JSON Content-Type. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: A crawl or refresh is running (sync_busy), or the stored source is not currently configured (source_unavailable).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error: { type: string, enum: [sync_busy, source_unavailable] }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { description: Refresh service unavailable. }
+  /api/v1/admin/tournament-refreshes/{jobId}:
+    get:
+      operationId: getTournamentRefresh
+      security: [{ basicAuth: [] }]
+      parameters:
+        - { name: jobId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Current job state. Failed jobs keep previous complete standings; diagnostics are logged server-side.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TournamentRefreshJob' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Unknown job, process restarted, or job evicted from the last 100 retained jobs. }
+        '500': { $ref: '#/components/responses/InternalError' }
+        '503': { description: Refresh service unavailable. }
   /api/v1/admin/tournaments/{id}/inclusion:
     patch:
       security: [{ basicAuth: [] }]
@@ -429,6 +485,15 @@ components:
         limit: { type: integer }
         total: { type: integer }
         last_sync_at: { type: string, format: date-time, nullable: true }
+    TournamentRefreshJob:
+      type: object
+      required: [id, tournamentId, state, startedAt, finishedAt]
+      properties:
+        id: { type: string }
+        tournamentId: { type: integer, minimum: 1 }
+        state: { type: string, enum: [running, succeeded, failed] }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time, nullable: true }
     Tournament:
       type: object
       required: [id, name, source, includedInRanking, inclusionVersion]

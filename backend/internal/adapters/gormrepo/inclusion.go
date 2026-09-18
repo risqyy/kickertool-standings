@@ -80,6 +80,17 @@ func (r *Repository) ListTournaments(ctx context.Context, filter domain.Tourname
 	return domain.TournamentPage{Items: items, Page: page, Limit: limit, Total: total, LastSyncAt: lastSync}, nil
 }
 
+func (r *Repository) GetTournament(ctx context.Context, id uint) (domain.TournamentAdminRow, error) {
+	var model TournamentModel
+	if err := r.db.WithContext(ctx).First(&model, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return domain.TournamentAdminRow{}, ports.ErrNotFound
+		}
+		return domain.TournamentAdminRow{}, err
+	}
+	return r.adminRow(ctx, model)
+}
+
 func (r *Repository) adminRow(ctx context.Context, model TournamentModel) (domain.TournamentAdminRow, error) {
 	var standings int64
 	var players int64
