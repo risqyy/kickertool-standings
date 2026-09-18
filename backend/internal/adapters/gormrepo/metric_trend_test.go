@@ -58,6 +58,9 @@ func TestMetricTrendsUseIndependentRoundedValuesAndSurviveUnchangedSnapshots(t *
 			snapshots[index].Standings = append(snapshots[index].Standings, row)
 		}
 	}
+	// Explicit zero games are non-participation, including in the baseline.
+	delete(want, "Zero All Games")
+	want["Zero Before Games"] = [2]domain.MetricTrend{domain.MetricTrendUnavailable, domain.MetricTrendUnavailable}
 	snapshots[1].Standings = append(snapshots[1].Standings, standing("metric-latest", "new-row", "new", "New Player", 10))
 	for attempt := 0; attempt < 2; attempt++ {
 		for _, snapshot := range snapshots {

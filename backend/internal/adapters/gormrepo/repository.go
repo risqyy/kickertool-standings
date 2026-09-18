@@ -167,6 +167,9 @@ type AllocationModel struct {
 }
 
 type StandingModel struct {
+	// Retain obsolete source rows for provenance, but only the latest complete
+	// snapshot contributes. Omit false from JSON to preserve legacy merge hashes.
+	Superseded                   bool    `gorm:"not null;default:false" json:",omitempty"`
 	ID                           uint    `gorm:"primaryKey"`
 	Source                       string  `gorm:"not null;uniqueIndex:ux_standing_source_tournament_player,priority:1;uniqueIndex:ux_standing_source_key,priority:1;uniqueIndex:ux_standing_source_external,priority:1"`
 	TournamentID                 string  `gorm:"not null;uniqueIndex:ux_standing_source_tournament_player,priority:2"`
@@ -312,7 +315,7 @@ func OpenSQLite(path string, clock ports.Clock) (*Repository, *gorm.DB, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	if err := db.AutoMigrate(&CrawlSyncStatusModel{}, &TournamentModel{}, &DisciplineModel{}, &StageModel{}, &GroupModel{}, &EntryModel{}, &PlayerModel{}, &PlayerNameAliasModel{}, &SourcePlayerIdentityModel{}, &EntryMembershipModel{}, &GroupStandingModel{}, &AllocationModel{}, &StandingModel{}, &PlayerAggregateModel{}, &PlayerMergeAuditModel{}, &TournamentInclusionAuditModel{}, &ManualRankingCorrectionModel{}, &ManualRankingCorrectionRevisionModel{}); err != nil {
+	if err := db.AutoMigrate(&CrawlSyncStatusModel{}, &TournamentModel{}, &DisciplineModel{}, &StageModel{}, &GroupModel{}, &EntryModel{}, &PlayerModel{}, &PlayerNameAliasModel{}, &SourcePlayerIdentityModel{}, &EntryMembershipModel{}, &GroupStandingModel{}, &AllocationModel{}, &StandingModel{}, &StandingArchiveModel{}, &PlayerAggregateModel{}, &PlayerMergeAuditModel{}, &TournamentInclusionAuditModel{}, &ManualRankingCorrectionModel{}, &ManualRankingCorrectionRevisionModel{}); err != nil {
 		return nil, db, fmt.Errorf("auto migrate tournaments: %w", err)
 	}
 	if err := backfillManualCorrectionYears(db); err != nil {
@@ -329,7 +332,7 @@ func New(db *gorm.DB, clock ports.Clock) (*Repository, error) {
 	if db == nil {
 		return nil, errors.New("gorm db is required")
 	}
-	if err := db.AutoMigrate(&CrawlSyncStatusModel{}, &TournamentModel{}, &DisciplineModel{}, &StageModel{}, &GroupModel{}, &EntryModel{}, &PlayerModel{}, &PlayerNameAliasModel{}, &SourcePlayerIdentityModel{}, &EntryMembershipModel{}, &GroupStandingModel{}, &AllocationModel{}, &StandingModel{}, &PlayerAggregateModel{}, &PlayerMergeAuditModel{}, &TournamentInclusionAuditModel{}, &ManualRankingCorrectionModel{}, &ManualRankingCorrectionRevisionModel{}); err != nil {
+	if err := db.AutoMigrate(&CrawlSyncStatusModel{}, &TournamentModel{}, &DisciplineModel{}, &StageModel{}, &GroupModel{}, &EntryModel{}, &PlayerModel{}, &PlayerNameAliasModel{}, &SourcePlayerIdentityModel{}, &EntryMembershipModel{}, &GroupStandingModel{}, &AllocationModel{}, &StandingModel{}, &StandingArchiveModel{}, &PlayerAggregateModel{}, &PlayerMergeAuditModel{}, &TournamentInclusionAuditModel{}, &ManualRankingCorrectionModel{}, &ManualRankingCorrectionRevisionModel{}); err != nil {
 		return nil, fmt.Errorf("auto migrate tournaments: %w", err)
 	}
 	if err := backfillManualCorrectionYears(db); err != nil {
@@ -601,6 +604,7 @@ func (r *Repository) qualifiedRankingTournaments(ctx context.Context, year *int,
 	var standingRefs []uint
 	if err := r.db.WithContext(ctx).Model(&StandingModel{}).
 		Where("tournament_ref IN ?", refs).
+		Where("superseded = ? AND (games_played IS NULL OR games_played <> 0)", false).
 		Group("tournament_ref").Pluck("tournament_ref", &standingRefs).Error; err != nil {
 		return nil, fmt.Errorf("find complete ranking standings: %w", err)
 	}
@@ -697,6 +701,14 @@ func (r *Repository) UpsertStandingSnapshot(ctx context.Context, snapshot domain
 			return err
 		}
 		touched := make(map[string]struct{})
+		var previous []StandingModel
+		if err := tx.Where("tournament_ref = ?", tournament.ID).Find(&previous).Error; err != nil {
+			return err
+		}
+		for _, row := range previous {
+			touched[row.PlayerKey] = struct{}{}
+		}
+		seen := make([]uint, 0, len(standings))
 		for _, standing := range standings {
 			standing.PlayerKey = domain.PlayerKey(standing.PlayerName)
 			if err := validateStanding(standing, snapshot); err != nil {
@@ -716,19 +728,21 @@ func (r *Repository) UpsertStandingSnapshot(ctx context.Context, snapshot domain
 			if err := bindAllocationsToPlayer(tx, snapshot.Source, standing, player.ID); err != nil {
 				return err
 			}
-			existing, findErr := findStanding(tx, standing)
+			existing, findErr := findStanding(tx, standing, now)
 			if errors.Is(findErr, gorm.ErrRecordNotFound) {
 				if createErr := tx.Create(standingModel).Error; createErr != nil {
 					return fmt.Errorf("insert standing %s: %w", standing.StandingKey, createErr)
 				}
 				result.StandingsInserted++
+				seen = append(seen, standingModel.ID)
 				continue
 			}
 			if findErr != nil {
 				return fmt.Errorf("find standing %s: %w", standing.StandingKey, findErr)
 			}
+			seen = append(seen, existing.ID)
 			if sameStanding(existing, standing, tournament.ID, player.ID) {
-				if updateErr := tx.Model(&existing).Update("last_seen_at", now).Error; updateErr != nil {
+				if updateErr := tx.Model(&existing).Updates(map[string]any{"last_seen_at": now, "superseded": false}).Error; updateErr != nil {
 					return fmt.Errorf("touch standing %s: %w", standing.StandingKey, updateErr)
 				}
 				result.StandingsUnchanged++
@@ -738,6 +752,13 @@ func (r *Repository) UpsertStandingSnapshot(ctx context.Context, snapshot domain
 				return fmt.Errorf("update standing %s: %w", standing.StandingKey, updateErr)
 			}
 			result.StandingsUpdated++
+		}
+		obsolete := tx.Model(&StandingModel{}).Where("tournament_ref = ? AND superseded = ?", tournament.ID, false)
+		if len(seen) > 0 {
+			obsolete = obsolete.Where("id NOT IN ?", seen)
+		}
+		if err := obsolete.Update("superseded", true).Error; err != nil {
+			return fmt.Errorf("retire obsolete standings: %w", err)
 		}
 		for playerKey := range touched {
 			if err := r.recalculateAggregate(tx, snapshot.Source, playerKey, r.clock.Now()); err != nil {
@@ -1006,7 +1027,7 @@ func upsertSourcePlayerIdentity(tx *gorm.DB, source, externalID, nameKey string,
 	return nil
 }
 
-func findStanding(tx *gorm.DB, standing domain.TournamentStanding) (StandingModel, error) {
+func findStanding(tx *gorm.DB, standing domain.TournamentStanding, now time.Time) (StandingModel, error) {
 	var bySourceID StandingModel
 	sourceIDErr := gorm.ErrRecordNotFound
 	if standing.StandingID != "" {
@@ -1025,6 +1046,21 @@ func findStanding(tx *gorm.DB, standing domain.TournamentStanding) (StandingMode
 		return StandingModel{}, playerErr
 	}
 	if sourceIDErr == nil && playerErr == nil && bySourceID.ID != byPlayer.ID {
+		// A historical identity must not prevent a new authoritative correction.
+		// Preserve the displaced raw row in the archive before freeing its unique
+		// keys. Two current rows remain ambiguous and must never be guessed at.
+		if byPlayer.Superseded {
+			if err := archiveObsoleteStanding(tx, byPlayer, now); err != nil {
+				return StandingModel{}, err
+			}
+			return bySourceID, nil
+		}
+		if bySourceID.Superseded {
+			if err := archiveObsoleteStanding(tx, bySourceID, now); err != nil {
+				return StandingModel{}, err
+			}
+			return byPlayer, nil
+		}
 		return StandingModel{}, fmt.Errorf("ambiguous standing identity: source standing ID and tournament player resolve to different rows")
 	}
 	if sourceIDErr == nil {
@@ -1041,6 +1077,7 @@ func (r *Repository) recalculateAggregate(tx *gorm.DB, source, playerKey string,
 	if err := tx.Joins("JOIN tournament_models ON tournament_models.id = standing_models.tournament_ref").Where("standing_models.source = ? AND standing_models.player_key = ? AND tournament_models.included_in_ranking = ?", source, playerKey, true).Find(&rows).Error; err != nil {
 		return fmt.Errorf("load standings for aggregate %s: %w", playerKey, err)
 	}
+	rows = contributingStandings(rows)
 	var player PlayerModel
 	if err := tx.Where("canonical_name_key = ?", playerKey).First(&player).Error; err != nil {
 		return fmt.Errorf("find aggregate player %s: %w", playerKey, err)
@@ -1194,7 +1231,7 @@ func toStandingModel(standing domain.TournamentStanding, tournamentRef, playerRe
 }
 
 func standingUpdates(model *StandingModel) map[string]any {
-	return map[string]any{"tournament_ref": model.TournamentRef, "source_standing_id": model.SourceStandingID, "standing_key": model.StandingKey,
+	return map[string]any{"superseded": model.Superseded, "tournament_ref": model.TournamentRef, "source_standing_id": model.SourceStandingID, "standing_key": model.StandingKey,
 		"group": model.Group, "player_id": model.PlayerID, "player_key": model.PlayerKey, "player_ref": model.PlayerRef,
 		"discipline_id": model.DisciplineID, "stage_id": model.StageID, "player_name": model.PlayerName, "entry_id": model.EntryID, "entry_name": model.EntryName, "team": model.Team, "partner": model.Partner, "rank": model.Rank, "result": model.Result, "preliminary": model.Preliminary, "final_result": model.FinalResult, "points_cents": model.PointsCents, "points_per_match_cents": model.PointsPerMatchCents, "corrected_points_per_match_cents": model.CorrectedPointsPerMatchCents, "has_corrected_value": model.HasCorrectedValue,
 		"games_played": model.GamesPlayed, "goal_difference": model.GoalDifference,
