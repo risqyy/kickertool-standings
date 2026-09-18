@@ -11,7 +11,7 @@ vi.mock('@/api/client', async importOriginal => ({ ...await importOriginal<typeo
 const profile = { id: 2, displayName: 'Alex Beispiel', canonicalNameKey: 'alex beispiel', active: true, aliases: [], tournamentCount: 1, gamesPlayed: 5, totalPointsCents: 1200, pointsPerGameCents: 240, goalDifference: null }
 const summary = { id: 2, displayName: 'Alex Beispiel', active: true, mergedIntoPlayerId: null }
 const page: PlayerPage = { items: [summary, { id: 1, displayName: 'Alter Name', active: false, mergedIntoPlayerId: 2 }], total: 26, limit: 25, page: 1 }
-const contribution = { id: 10, tournamentId: 4, name: 'Septemberturnier', date: '2026-08-31T22:30:00Z', source: 'kickertool_api', sourceId: 'external-id', url: 'https://example.test/4', status: 'finished', reason: 'counted' as const, gamesPlayed: 4, totalPointsCents: 1000, pointsPerGameCents: 250, goalDifference: null }
+const contribution = { id: 10, tournamentId: 4, name: 'Septemberturnier', date: '2026-08-31T22:30:00Z', source: 'kickertool_api', sourceId: 'external-id', standingRank: 6, standingSourceId: 'standing-42', standingKey: 'final/alex', sourcePlayerName: 'Source Alias', url: 'https://example.test/4', status: 'finished', reason: 'counted' as const, gamesPlayed: 4, totalPointsCents: 1000, pointsPerGameCents: 250, goalDifference: null }
 const correction: ManualRankingCorrection = { id: 1, playerId: 2, playerKey: 'alex beispiel', effectiveDate: '2026-09-01', effectiveYear: 2026, tournamentCountDelta: 0, gamesPlayedDelta: 1, pointsCentsDelta: 200, goalDifferenceDelta: 0, reason: 'Ergebnis korrigiert', administrator: 'admin', createdAt: '2026-09-01T10:00:00Z', status: 'active', revokedAt: null, revision: 1, version: 1 }
 const statistics: PlayerStatistics = { requestedPlayer: summary, player: profile, tournaments: [contribution], corrections: [{ correction, effective: true }], computedAt: '2026-09-18T12:00:00Z' }
 function Location() { return <span data-testid="location">{useLocation().search}</span> }
@@ -55,17 +55,24 @@ describe('admin player list', () => {
 
 describe('player contribution detail', () => {
   it('shows server totals, all reasons, unknown values, Berlin dates and correction states', async () => {
-    vi.mocked(getPlayerStatistics).mockResolvedValue({ ...statistics, requestedPlayer: { ...summary, id: 1, displayName: 'Alter Name', active: false, mergedIntoPlayerId: 2 }, tournaments: [contribution, { ...contribution, id: 11, name: 'Abwesend', reason: 'zero_games', gamesPlayed: 0, url: 'javascript:alert(1)' }, { ...contribution, id: 12, reason: 'excluded' }, { ...contribution, id: 13, reason: 'superseded' }], corrections: [{ correction, effective: true }, { correction: { ...correction, id: 2, effectiveDate: '2099-01-01' }, effective: false }, { correction: { ...correction, id: 3, status: 'revoked' }, effective: false }, { correction: { ...correction, id: 4, status: 'replaced' }, effective: false }] })
+    vi.mocked(getPlayerStatistics).mockResolvedValue({ ...statistics, requestedPlayer: { ...summary, id: 1, displayName: 'Alter Name', active: false, mergedIntoPlayerId: 2 }, tournaments: [contribution, { ...contribution, id: 11, name: 'Abwesend', reason: 'zero_games', gamesPlayed: 0, standingRank: null, standingSourceId: null, standingKey: '', sourcePlayerName: '', url: 'javascript:alert(1)' }, { ...contribution, id: 12, reason: 'excluded' }, { ...contribution, id: 13, reason: 'superseded' }], corrections: [{ correction, effective: true }, { correction: { ...correction, id: 2, effectiveDate: '2099-01-01' }, effective: false }, { correction: { ...correction, id: 3, status: 'revoked' }, effective: false }, { correction: { ...correction, id: 4, status: 'replaced' }, effective: false }] })
     renderPages('/admin/players/1')
     expect(await screen.findByRole('heading', { name: 'Alter Name' })).toBeInTheDocument()
     expect(screen.getByRole('status')).toHaveTextContent('Diese Identität wurde zusammengeführt')
     expect(screen.getByRole('link', { name: 'Alex Beispiel' })).toHaveAttribute('href', '/admin/players/2')
     for (const label of ['Gewertet', 'Nicht gewertet: 0 Spiele', 'Turnier ausgeschlossen', 'Überholtes Ergebnis']) expect(screen.getByText(label, { exact: true })).toBeInTheDocument()
     expect(screen.getAllByText('01.09.2026 · finished')).toHaveLength(4)
+    expect(screen.getAllByText('Platz 6')).toHaveLength(3)
+    expect(screen.getAllByText('Source Alias')).toHaveLength(3)
+    expect(screen.getAllByText('standing-42')).toHaveLength(3)
+    expect(screen.getAllByText('final/alex')).toHaveLength(3)
+    const absent = within(screen.getByRole('heading', { name: 'Abwesend' }).closest('article')!)
+    expect(absent.getAllByText('Unbekannt')).toHaveLength(4)
+    expect(absent.queryByText(/Platz \d/)).not.toBeInTheDocument()
     expect(screen.getAllByText('—').length).toBeGreaterThan(0)
     expect(screen.getByText('12.00')).toBeInTheDocument()
     expect(screen.getByText('2.40')).toBeInTheDocument()
-    expect(screen.getAllByRole('link', { name: /Turnier in der Quelle öffnen/ })).toHaveLength(3)
+    expect(screen.getAllByRole('link', { name: /Ergebnis in der Quelle öffnen/ })).toHaveLength(3)
     for (const label of ['Wirksam', 'Geplant', 'Aufgehoben', 'Ersetzt']) expect(screen.getByRole('heading', { name: new RegExp('Korrektur #\\d · ' + label) })).toBeInTheDocument()
     expect(screen.getAllByText('+2.00')).toHaveLength(4)
   })

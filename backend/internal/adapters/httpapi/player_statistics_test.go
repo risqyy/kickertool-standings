@@ -27,8 +27,9 @@ func (f *fakePlayerStatisticsRepository) ListPlayers(_ context.Context, filter d
 func (f *fakePlayerStatisticsRepository) GetPlayerStatistics(_ context.Context, id uint) (domain.PlayerStatistics, error) {
 	f.id = id
 	now := time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)
+	rank, standingID := 6, "source-result"
 	return domain.PlayerStatistics{RequestedPlayer: domain.PlayerSummary{ID: id, DisplayName: "Test Player", Active: true}, Player: domain.PlayerProfile{ID: id, DisplayName: "Test Player"}, ComputedAt: now,
-		Tournaments: []domain.PlayerTournamentContribution{{ID: 1, TournamentID: 2, URL: "javascript:alert(1)", Reason: "zero_games"}, {ID: 3, TournamentID: 4, URL: "https://example.test/4", Reason: "counted"}},
+		Tournaments: []domain.PlayerTournamentContribution{{ID: 1, TournamentID: 2, URL: "javascript:alert(1)", Reason: "zero_games"}, {ID: 3, TournamentID: 4, URL: "https://example.test/4", Reason: "counted", StandingRank: &rank, StandingSourceID: &standingID, StandingKey: "final/source-result", SourcePlayerName: "Source Alias"}},
 		Corrections: []domain.ManualRankingCorrection{
 			{ID: 1, Status: "active", EffectiveDate: now.Add(-time.Hour)},
 			{ID: 2, Status: "active", EffectiveDate: now.Add(time.Hour)},
@@ -93,6 +94,20 @@ func TestPlayerStatisticsJSONContractAndValidation(t *testing.T) {
 	for i, correction := range result.Corrections {
 		if correction.Effective != (i == 0) || correction.Correction["effectiveDate"] == nil {
 			t.Fatalf("correction=%+v", correction)
+		}
+	}
+	known, unknown := result.Tournaments[1], result.Tournaments[0]
+	if known.StandingRank == nil || *known.StandingRank != 6 || known.StandingSourceID == nil || *known.StandingSourceID != "source-result" || known.StandingKey != "final/source-result" || known.SourcePlayerName != "Source Alias" || unknown.StandingRank != nil || unknown.StandingSourceID != nil {
+		t.Fatalf("standing provenance=%+v", result.Tournaments)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &wire); err != nil {
+		t.Fatal(err)
+	}
+	unknownWire := wire["tournaments"].([]any)[0].(map[string]any)
+	for _, key := range []string{"standingRank", "standingSourceId"} {
+		if value, exists := unknownWire[key]; !exists || value != nil {
+			t.Fatalf("missing source values must be explicit null: %s=%v (exists=%v)", key, value, exists)
 		}
 	}
 	repository.err = ports.ErrNotFound

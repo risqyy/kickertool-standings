@@ -14,8 +14,8 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
       requestedPlayer: summary,
       player: { ...summary, aliases: [], canonicalNameKey: 'alex beispiel', tournamentCount: 1, gamesPlayed: 4, totalPointsCents: 1250, pointsPerGameCents: 313, goalDifference: null },
       tournaments: [
-        { id: 1, tournamentId: 10, name: 'Sommerturnier', date: '2026-08-31T22:30:00Z', source: 'kickertool_api', sourceId: 'summer', url: 'https://example.test/summer', status: 'finished', reason: 'counted', gamesPlayed: 4, totalPointsCents: 1000, pointsPerGameCents: 250, goalDifference: null },
-        { id: 2, tournamentId: 11, name: 'Abwesenheit', date: '2026-09-18T18:00:00Z', source: 'kickertool_api', sourceId: 'autumn', url: '', status: 'finished', reason: 'zero_games', gamesPlayed: 0, totalPointsCents: 0, pointsPerGameCents: null, goalDifference: 0 }
+        { id: 1, tournamentId: 10, name: 'Sommerturnier', date: '2026-08-31T22:30:00Z', source: 'kickertool_api', sourceId: 'summer', standingRank: 6, standingSourceId: 'source-result-42', standingKey: 'summer/final/source-alias', sourcePlayerName: 'Source Alias', url: 'https://example.test/summer/groups/final/standings', status: 'finished', reason: 'counted', gamesPlayed: 4, totalPointsCents: 1000, pointsPerGameCents: 250, goalDifference: null },
+        { id: 2, tournamentId: 11, name: 'Abwesenheit', date: '2026-09-18T18:00:00Z', source: 'kickertool_api', sourceId: 'autumn', standingRank: null, standingSourceId: null, standingKey: '', sourcePlayerName: '', url: '', status: 'finished', reason: 'zero_games', gamesPlayed: 0, totalPointsCents: 0, pointsPerGameCents: null, goalDifference: 0 }
       ],
       corrections: [{ effective: true, correction: { id: 1, playerId: 7, playerKey: 'alex beispiel', effectiveDate: '2026-09-01', effectiveYear: 2026, tournamentCountDelta: 0, gamesPlayedDelta: 0, pointsCentsDelta: 250, goalDifferenceDelta: 0, reason: 'Ergebnis nachgetragen', administrator: 'admin', createdAt: '2026-09-18T10:00:00Z', status: 'active', revokedAt: null, revision: 1, version: 1 } }],
       computedAt: '2026-09-18T10:00:00Z'
@@ -35,7 +35,13 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     await expect(page.getByText('Nicht gewertet: 0 Spiele')).toBeVisible()
     await expect(page.getByRole('heading', { name: 'Korrektur #1 · Wirksam' })).toBeVisible()
     await expect(page.getByText('+2.50', { exact: true })).toBeVisible()
-    await expect(page.getByRole('link', { name: /Turnier in der Quelle öffnen/ })).toHaveAttribute('rel', 'noopener noreferrer')
+    await expect(page.getByRole('link', { name: /Ergebnis in der Quelle öffnen/ })).toHaveAttribute('rel', 'noopener noreferrer')
+    await expect(page.getByText('Platz 6', { exact: true })).toBeVisible()
+    await expect(page.getByText('Source Alias', { exact: true })).toBeVisible()
+    await expect(page.getByText('source-result-42', { exact: true })).toBeVisible()
+    await expect(page.getByText('summer/final/source-alias', { exact: true })).toBeVisible()
+    await expect(page.getByText('Unbekannt', { exact: true })).toHaveCount(4)
+    await expect(page.getByRole('link', { name: /Ergebnis in der Quelle öffnen/ })).toHaveAttribute('href', 'https://example.test/summer/groups/final/standings')
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
     await page.screenshot({ path: testInfo.outputPath('player-statistics.png'), fullPage: true })
     await page.getByRole('link', { name: 'Zur Spielerübersicht' }).click()

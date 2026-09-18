@@ -259,6 +259,10 @@ export interface PlayerTournamentContribution {
   date: Nullable<string>
   source: string
   sourceId: string
+  standingRank: Nullable<number>
+  standingSourceId: Nullable<string>
+  standingKey: string
+  sourcePlayerName: string
   url: string
   status: string
   reason: 'counted' | 'excluded' | 'zero_games' | 'superseded'

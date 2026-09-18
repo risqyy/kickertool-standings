@@ -563,15 +563,19 @@ components:
     PlayerTournamentContribution:
       type: object
       description: Retained source row, ordered by date descending (unknown dates last), tournament ID descending, then row ID descending. Metrics are source values even for non-counted rows. Superseded takes precedence over excluded, then zero_games. Archived obsolete identity collisions are not a complete revision history in this response.
-      required: [id, tournamentId, name, date, source, sourceId, url, status, reason, gamesPlayed, totalPointsCents, pointsPerGameCents, goalDifference]
+      required: [id, tournamentId, name, date, source, sourceId, standingRank, standingSourceId, standingKey, sourcePlayerName, url, status, reason, gamesPlayed, totalPointsCents, pointsPerGameCents, goalDifference]
       properties:
-        id: { type: integer, description: Standing row ID. }
+        id: { type: integer, description: Internal standing row ID; not the source rank or source result identifier. }
         tournamentId: { type: integer }
         name: { type: string, description: Falls back to the internal tournament ID when unnamed. }
         date: { type: string, format: date-time, nullable: true }
         source: { type: string }
-        sourceId: { type: string }
-        url: { type: string, description: HTTP(S) source URL without credentials; empty when unavailable or unsafe. }
+        sourceId: { type: string, description: Source tournament identifier. }
+        standingRank: { type: integer, nullable: true, description: Stored source standing position; unknown when absent. Never the overall ranking or inferred from the list order. }
+        standingSourceId: { type: string, nullable: true, description: Source result identifier; null when absent. }
+        standingKey: { type: string, description: Stored source standing key; empty when unavailable. }
+        sourcePlayerName: { type: string, description: Player name on the stored source result; may differ from the canonical player after a merge. Empty when unknown. }
+        url: { type: string, description: Stored standing result-page URL with tournament URL fallback when absent. HTTP(S) without credentials; empty when unavailable or unsafe. }
         status: { type: string }
         reason: { type: string, enum: [counted, excluded, zero_games, superseded] }
         gamesPlayed: { type: integer, nullable: true }

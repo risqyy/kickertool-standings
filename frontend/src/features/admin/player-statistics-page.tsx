@@ -51,7 +51,22 @@ export function PlayerStatisticsPage() {
 
 function TournamentContribution({ row }: { row: PlayerTournamentContribution }) {
   const url = safeUrl(row.url)
-  return <article className="rounded-lg border bg-card p-4 sm:p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><h3 className="break-words font-semibold">{row.name}</h3><p className="mt-1 text-sm text-muted-foreground">{date(row.date)} · {row.status}</p></div><span className="rounded-md bg-muted px-3 py-1 text-sm font-medium">{reasons[row.reason]}</span></div><p className="mt-3 break-all text-xs text-muted-foreground">Quelle: {row.source} · ID: {row.sourceId} · Ergebnis #{row.id}</p>{url && <a className="mt-1 inline-flex min-h-11 items-center text-sm text-primary underline underline-offset-4" href={url} target="_blank" rel="noopener noreferrer">Turnier in der Quelle öffnen<span className="sr-only"> (neuer Tab)</span></a>}<dl className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4"><SourceMetrics value={row} /></dl></article>
+  return <article className="rounded-lg border bg-card p-4 sm:p-5">
+    <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><h3 className="break-words font-semibold">{row.name}</h3><p className="mt-1 text-sm text-muted-foreground">{date(row.date)} · {row.status}</p></div><span className="rounded-md bg-muted px-3 py-1 text-sm font-medium">{reasons[row.reason]}</span></div>
+    <dl className="mt-4 grid grid-cols-1 gap-3 rounded-md bg-muted/40 p-3 sm:grid-cols-2">
+      <Provenance label="Standing-Platz (Quelle)" value={row.standingRank == null ? 'Unbekannt' : `Platz ${row.standingRank}`} />
+      <Provenance label="Spielername in der Quelle" value={row.sourcePlayerName} />
+      <Provenance label="Quell-Ergebnis-ID" value={row.standingSourceId} />
+      <Provenance label="Standing-Key" value={row.standingKey} />
+    </dl>
+    <p className="mt-3 break-all text-xs text-muted-foreground">Quelle: {row.source} · Quell-Turnier-ID: {row.sourceId} · Internes Ergebnis #{row.id}</p>
+    {url && <a className="mt-1 inline-flex min-h-11 items-center text-sm text-primary underline underline-offset-4" href={url} target="_blank" rel="noopener noreferrer">Ergebnis in der Quelle öffnen<span className="sr-only"> (neuer Tab)</span></a>}
+    <dl className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4"><SourceMetrics value={row} /></dl>
+  </article>
+}
+
+function Provenance({ label, value }: { label: string; value: string | null }) {
+  return <div className="min-w-0"><dt className="text-xs text-muted-foreground">{label}</dt><dd className="break-all text-sm font-medium">{value?.trim() ? value : 'Unbekannt'}</dd></div>
 }
 
 function SourceMetrics({ value }: { value: Pick<PlayerTournamentContribution, 'gamesPlayed' | 'totalPointsCents' | 'pointsPerGameCents' | 'goalDifference'> }) {
