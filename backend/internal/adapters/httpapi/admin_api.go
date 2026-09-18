@@ -143,6 +143,8 @@ func (h *AdminAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.setInclusion(w, r)
 	case r.Method == http.MethodPost && (r.URL.Path == "/api/admin/players" || r.URL.Path == "/api/admin/players/create"):
 		h.playerCreate(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/admin/players":
+		h.playerList(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/admin/players/search":
 		h.playerSearch(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/admin/players/merges":
@@ -159,6 +161,8 @@ func (h *AdminAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.correctionConfirm(w, r)
 	case r.Method == http.MethodPost && h.isCorrectionRevokePath(r.URL.Path):
 		h.correctionRevoke(w, r)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/admin/players/") && strings.HasSuffix(r.URL.Path, "/statistics"):
+		h.playerStatistics(w, r)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/admin/players/"):
 		h.playerDetail(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/admin/players/merge/preview":
