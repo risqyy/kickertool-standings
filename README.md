@@ -36,6 +36,29 @@ The public “Letzte Synchronisierung” timestamp records the completion of the
 
 Player identity is the normalized NFC name: trim, collapse all whitespace runs to one ASCII space, Unicode-aware lowercase, without removing diacritics. Aliases and source identities preserve provenance. Manual merges transfer aliases and allocations transactionally, retain the source as a merged tombstone, deduplicate shared allocations, and recalculate the target aggregate from raw included results. Each new merge also stores an exact recovery snapshot and post-merge fingerprint: administrators can preview and confirm an atomic undo while the participants remain unchanged. Older merges without snapshots are shown as unavailable instead of being partially restored.
 
+## Refresh one tournament
+
+In **Admin → Turniere**, choose **Ergebnisse neu laden** on the tournament row or
+mobile card. **Liste neu laden** only reloads the displayed list. The result action
+fetches that stored tournament's standings from the configured source, including
+finalized tournaments, without discovery or the daily waiting period. Tournament
+metadata (name, date, status) still comes from regular discovery.
+
+An authenticated, CSRF-protected request starts a background job; the page polls
+its status and offers another attempt after errors. The job survives the start
+request, has a ten-minute deadline, and stops on server shutdown. The last 100 job
+statuses are kept in memory until restart. If status retrieval fails, the UI says
+the result is unknown; the job may still be running. A regular crawl or another
+refresh prevents a new manual start (`409 sync_busy`); the scheduler waits for a
+manual refresh to finish. A tournament from an inactive source is rejected.
+
+Successful complete snapshots update that tournament's **Zuletzt geprüft** time,
+including unchanged results. Failed or incomplete snapshots preserve previous
+complete results. Existing inclusion choices, identities, merges, and manual
+corrections continue to apply. A single refresh never advances the global
+**Letzte Synchronisierung**, which continues to mean a fully successful crawl.
+The API endpoints and job states are documented in `backend/api/openapi.yaml`.
+
 ## Configuration
 
 The root `.env` is loaded for local Go startup without overriding real process environment variables. It is ignored and must never be committed. Copy `.env.example` and set values without printing secrets.
@@ -144,10 +167,10 @@ npm run build
 
 Contract changes must update `backend/api/openapi.yaml` and the typed frontend client together.
 
-Public browser regressions can run without backend credentials or a database:
+Public and single-tournament refresh browser regressions can run without backend credentials or a database:
 `cd frontend` then `npx playwright test --config playwright.public.config.ts`.
 They exercise monthly selection, independent metric trends, synchronization
-status, search, sorting, and desktop/mobile layouts with fixed API fixtures.
+status, search, sorting, admin refresh success/failure/retry, and desktop/mobile layouts with fixed API fixtures.
 
 Public rankings expose independent `pointsPerGameTrend` and `goalDifferenceTrend`
 states (`up`, `down`, `same`, `unavailable`) alongside the placement trend.

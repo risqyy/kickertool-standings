@@ -1,5 +1,24 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ApiError, confirmManualCorrection, confirmPlayerMergeUndo, createPlayer, getAdminSession, getRankings, listPlayerMerges, previewManualCorrection, previewMerge, previewPlayerMergeUndo, revokeManualCorrection } from './client'
+import { ApiError, confirmManualCorrection, confirmPlayerMergeUndo, createPlayer, getAdminSession, getRankings, getTournamentRefresh, startTournamentRefresh, listPlayerMerges, previewManualCorrection, previewMerge, previewPlayerMergeUndo, revokeManualCorrection } from './client'
+
+describe('single tournament refresh API', () => {
+  it('starts with CSRF and polls the accepted job using admin credentials', async () => {
+    const job = { id: 'job-7', tournamentId: 7, state: 'running', startedAt: '2026-09-18T10:00:00Z', finishedAt: null }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(job), { status: 202 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ...job, state: 'succeeded' }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(startTournamentRefresh('csrf-token', 7)).resolves.toEqual(job)
+    await expect(getTournamentRefresh(job.id)).resolves.toMatchObject({ state: 'succeeded' })
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/admin/tournaments/7/refresh')
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(init).toMatchObject({ method: 'POST', credentials: 'include', body: '{}' })
+    expect(new Headers(init.headers).get('X-CSRF-Token')).toBe('csrf-token')
+    expect(new Headers(init.headers).get('Content-Type')).toBe('application/json')
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/admin/tournament-refreshes/job-7')
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({ credentials: 'include' })
+  })
+})
 
 describe('public rankings API', () => {
   it('adds the selected year as a query parameter and keeps the overall URL unchanged', async () => {

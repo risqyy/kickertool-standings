@@ -87,7 +87,10 @@ func main() {
 		logger.Error().Str("source", string(cfg.Source)).Msg("unsupported crawler source")
 		os.Exit(1)
 	}
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 	crawler := app.NewCrawler(source, repo, clock, &logger, app.WithStandings(standingSource, repo))
+	refresher := app.NewTournamentRefresher(ctx, crawler, repo)
 	scheduler := app.NewScheduler(crawler, clock, cfg.Interval, &logger)
 	publicRankingAPI := httpapi.NewPublicRankingAPIHandler(repo)
 	legacyRankingAPI := httpapi.NewRankingHandler(repo, &logger)
@@ -98,15 +101,13 @@ func main() {
 	mux.Handle("/healthz", httpapi.HealthHandler())
 	httpServer := &http.Server{Addr: ":8080", Handler: mux}
 	if cfg.AdminUIEnabled {
-		adminAPI := httpapi.NewAdminAPIHandler(repo, repo, repo, &logger)
+		adminAPI := httpapi.NewAdminAPIHandler(repo, repo, repo, &logger).WithTournamentRefresher(refresher)
 		protectedAPI := httpapi.AdminBasicAuth(httpapi.StripV1Prefix(adminAPI), cfg.AdminUsername, cfg.AdminPassword, &logger)
 		mux.Handle("/api/v1/admin/", protectedAPI)
 	} else {
 		mux.Handle("/api/v1/admin/", http.NotFoundHandler())
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 	logger.Info().Str("source", sourceLabel).Str("source_url", sourceURL).Str("db_path", cfg.DBPath).Dur("crawl_interval", cfg.Interval).Msg("crawler started")
 	serverErr := make(chan error, 1)
 	go func() {
@@ -120,6 +121,7 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	_ = httpServer.Shutdown(shutdownCtx)
+	refresher.Wait()
 	var listenErr error
 	select {
 	case listenErr = <-serverErr:

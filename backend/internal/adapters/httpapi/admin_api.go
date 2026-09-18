@@ -59,6 +59,7 @@ type AdminAPIHandler struct {
 	playerCreator   ports.PlayerCreator
 	merger          ports.PlayerMergeService
 	corrections     ports.ManualRankingCorrectionRepository
+	refresher       ports.TournamentRefresher
 	logger          *zerolog.Logger
 	mu              sync.Mutex
 	plans           map[string]adminMergePlan
@@ -134,6 +135,10 @@ func (h *AdminAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.dashboard(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/admin/tournaments":
 		h.tournamentList(w, r)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/admin/tournaments/") && strings.HasSuffix(r.URL.Path, "/refresh"):
+		h.startTournamentRefresh(w, r)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/admin/tournament-refreshes/"):
+		h.tournamentRefreshStatus(w, r)
 	case isMutation(r.Method) && strings.HasPrefix(r.URL.Path, "/api/admin/tournaments/") && strings.HasSuffix(r.URL.Path, "/inclusion"):
 		h.setInclusion(w, r)
 	case r.Method == http.MethodPost && (r.URL.Path == "/api/admin/players" || r.URL.Path == "/api/admin/players/create"):
