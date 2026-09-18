@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"kickertool-ranking/internal/domain"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -93,6 +95,57 @@ func TestMergedAliasCannotReplacePlayedResultWithZeroGames(t *testing.T) {
 				check()
 			})
 		}
+	}
+}
+
+func TestLosingAliasIdentityConflictRollsBackCompleteSnapshot(t *testing.T) {
+	for _, foreignTournament := range []bool{false, true} {
+		t.Run(fmt.Sprintf("foreignTournament=%t", foreignTournament), func(t *testing.T) {
+			ctx := context.Background()
+			repo, db := testRepo(t)
+			played := mergeStanding("cup", "played", "p1", "Full Name", 2400, 23, 0)
+			zero := mergeStanding("cup", "zero", "p2", "Short Name", 0, 0, 0)
+			other := mergeStanding("cup", "other-result", "p3", "Other Player", 500, 5, 2)
+			addMonthlyTournament(t, repo, "cup", "2026-09-10T18:00:00Z", played, zero, other)
+			if foreignTournament {
+				other.TournamentID, other.StandingID, other.StandingKey = "other-cup", "foreign-result", "foreign-result"
+				addMonthlyTournament(t, repo, "other-cup", "2026-09-11T18:00:00Z", other)
+			}
+			var full, short PlayerModel
+			if err := db.Where("canonical_name_key = ?", domain.PlayerKey(played.PlayerName)).First(&full).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Where("canonical_name_key = ?", domain.PlayerKey(zero.PlayerName)).First(&short).Error; err != nil {
+				t.Fatal(err)
+			}
+			if _, err := repo.MergePlayers(ctx, short.ID, full.ID, domain.PlayerMergeOptions{Actor: "test"}); err != nil {
+				t.Fatal(err)
+			}
+			readState := func() map[string][]map[string]any {
+				t.Helper()
+				state := make(map[string][]map[string]any)
+				for _, table := range []string{"standing_models", "standing_archive_models", "player_models", "source_player_identity_models", "player_name_alias_models", "player_aggregate_models", "tournament_models", "allocation_models"} {
+					var rows []map[string]any
+					if err := db.Table(table).Order("id").Find(&rows).Error; err != nil {
+						t.Fatal(err)
+					}
+					state[table] = rows
+				}
+				return state
+			}
+			before := readState()
+			changed := played
+			changed.PointsCents = int64Pointer(9900)
+			zero.StandingID = other.StandingID
+			zero.StandingKey = other.StandingKey
+			_, err := repo.UpsertStandingSnapshot(ctx, domain.StandingSnapshot{Source: played.Source, TournamentID: played.TournamentID, Complete: true, Standings: []domain.TournamentStanding{changed, zero}})
+			if err == nil || !strings.Contains(err.Error(), "ambiguous standing identity") {
+				t.Fatalf("invalid losing alias accepted: %v", err)
+			}
+			if after := readState(); !reflect.DeepEqual(before, after) {
+				t.Fatal("invalid snapshot changed stored results or identity state")
+			}
+		})
 	}
 }
 

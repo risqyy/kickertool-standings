@@ -728,6 +728,9 @@ func (r *Repository) UpsertStandingSnapshot(ctx context.Context, snapshot domain
 			standing.PlayerKey = player.CanonicalNameKey
 			touched[standing.PlayerKey] = struct{}{}
 			standing.LastSeenAt = now
+			if _, _, err := standingIdentityMatches(tx, standing); err != nil {
+				return err
+			}
 			if err := bindAllocationsToPlayer(tx, snapshot.Source, standing, player.ID); err != nil {
 				return err
 			}
@@ -1046,47 +1049,76 @@ func upsertSourcePlayerIdentity(tx *gorm.DB, source, externalID, nameKey string,
 	return nil
 }
 
-func findStanding(tx *gorm.DB, standing domain.TournamentStanding, now time.Time) (StandingModel, error) {
+// Validate every source row, including aliases that will not be selected, without
+// archiving or deleting anything. Obsolete identity conflicts are only reconciled
+// by findStanding when writing the selected result.
+func standingIdentityMatches(tx *gorm.DB, standing domain.TournamentStanding) (*StandingModel, *StandingModel, error) {
 	var bySourceID StandingModel
 	sourceIDErr := gorm.ErrRecordNotFound
 	if standing.StandingID != "" {
 		sourceIDErr = tx.Where("source = ? AND source_standing_id = ?", standing.Source, standing.StandingID).First(&bySourceID).Error
 		if sourceIDErr != nil && !errors.Is(sourceIDErr, gorm.ErrRecordNotFound) {
-			return StandingModel{}, sourceIDErr
+			return nil, nil, sourceIDErr
 		}
 		if sourceIDErr == nil && bySourceID.TournamentID != standing.TournamentID {
-			return StandingModel{}, fmt.Errorf("ambiguous standing identity: source standing ID belongs to another tournament")
+			return nil, nil, fmt.Errorf("ambiguous standing identity: source standing ID belongs to another tournament")
 		}
 	}
 
 	var byPlayer StandingModel
 	playerErr := tx.Where("source = ? AND tournament_id = ? AND player_key = ?", standing.Source, standing.TournamentID, standing.PlayerKey).First(&byPlayer).Error
 	if playerErr != nil && !errors.Is(playerErr, gorm.ErrRecordNotFound) {
-		return StandingModel{}, playerErr
+		return nil, nil, playerErr
 	}
-	if sourceIDErr == nil && playerErr == nil && bySourceID.ID != byPlayer.ID {
+	if sourceIDErr == nil && playerErr == nil && bySourceID.ID != byPlayer.ID && !bySourceID.Superseded && !byPlayer.Superseded {
+		return nil, nil, fmt.Errorf("ambiguous standing identity: source standing ID and tournament player resolve to different rows")
+	}
+	var byKey StandingModel
+	keyErr := tx.Where("source = ? AND standing_key = ?", standing.Source, standing.StandingKey).First(&byKey).Error
+	if keyErr != nil && !errors.Is(keyErr, gorm.ErrRecordNotFound) {
+		return nil, nil, keyErr
+	}
+	if keyErr == nil && (sourceIDErr != nil || byKey.ID != bySourceID.ID) && (playerErr != nil || byKey.ID != byPlayer.ID) {
+		return nil, nil, fmt.Errorf("ambiguous standing identity: standing key belongs to another result")
+	}
+	var sourceMatch, playerMatch *StandingModel
+	if sourceIDErr == nil {
+		sourceMatch = &bySourceID
+	}
+	if playerErr == nil {
+		playerMatch = &byPlayer
+	}
+	return sourceMatch, playerMatch, nil
+}
+
+func findStanding(tx *gorm.DB, standing domain.TournamentStanding, now time.Time) (StandingModel, error) {
+	bySourceID, byPlayer, err := standingIdentityMatches(tx, standing)
+	if err != nil {
+		return StandingModel{}, err
+	}
+	if bySourceID != nil && byPlayer != nil && bySourceID.ID != byPlayer.ID {
 		// A historical identity must not prevent a new authoritative correction.
 		// Preserve the displaced raw row in the archive before freeing its unique
 		// keys. Two current rows remain ambiguous and must never be guessed at.
 		if byPlayer.Superseded {
-			if err := archiveObsoleteStanding(tx, byPlayer, now); err != nil {
+			if err := archiveObsoleteStanding(tx, *byPlayer, now); err != nil {
 				return StandingModel{}, err
 			}
-			return bySourceID, nil
+			return *bySourceID, nil
 		}
 		if bySourceID.Superseded {
-			if err := archiveObsoleteStanding(tx, bySourceID, now); err != nil {
+			if err := archiveObsoleteStanding(tx, *bySourceID, now); err != nil {
 				return StandingModel{}, err
 			}
-			return byPlayer, nil
+			return *byPlayer, nil
 		}
 		return StandingModel{}, fmt.Errorf("ambiguous standing identity: source standing ID and tournament player resolve to different rows")
 	}
-	if sourceIDErr == nil {
-		return bySourceID, nil
+	if bySourceID != nil {
+		return *bySourceID, nil
 	}
-	if playerErr == nil {
-		return byPlayer, nil
+	if byPlayer != nil {
+		return *byPlayer, nil
 	}
 	return StandingModel{}, gorm.ErrRecordNotFound
 }
