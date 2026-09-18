@@ -121,7 +121,7 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	_ = httpServer.Shutdown(shutdownCtx)
-	refresher.Wait()
+	refresher.Shutdown()
 	var listenErr error
 	select {
 	case listenErr = <-serverErr:

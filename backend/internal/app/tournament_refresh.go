@@ -16,13 +16,14 @@ import (
 // crawler. Jobs outlive the HTTP request, but stop on application shutdown or
 // after ten minutes. The most recent 100 jobs are retained until process exit.
 type TournamentRefresher struct {
-	ctx     context.Context
-	crawler *CrawlerService
-	lookup  ports.TournamentLookup
-	mu      sync.Mutex
-	jobs    map[string]domain.TournamentRefreshJob
-	order   []string
-	workers sync.WaitGroup
+	ctx      context.Context
+	crawler  *CrawlerService
+	lookup   ports.TournamentLookup
+	mu       sync.Mutex
+	jobs     map[string]domain.TournamentRefreshJob
+	order    []string
+	workers  sync.WaitGroup
+	stopping bool
 }
 
 func NewTournamentRefresher(ctx context.Context, crawler *CrawlerService, lookup ports.TournamentLookup) *TournamentRefresher {
@@ -30,6 +31,19 @@ func NewTournamentRefresher(ctx context.Context, crawler *CrawlerService, lookup
 }
 
 func (s *TournamentRefresher) Start(ctx context.Context, id uint) (domain.TournamentRefreshJob, error) {
+	// Count admitted requests as well as workers: HTTP shutdown can time out
+	// while a request is still looking up its tournament.
+	s.mu.Lock()
+	if s.stopping {
+		s.mu.Unlock()
+		return domain.TournamentRefreshJob{}, context.Canceled
+	}
+	s.workers.Add(1)
+	s.mu.Unlock()
+	defer s.workers.Done()
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(s.ctx, cancel)
+	defer func() { stop(); cancel() }()
 	if err := s.ctx.Err(); err != nil {
 		return domain.TournamentRefreshJob{}, err
 	}
@@ -61,6 +75,10 @@ func (s *TournamentRefresher) Start(ctx context.Context, id uint) (domain.Tourna
 	}
 	job := domain.TournamentRefreshJob{ID: hex.EncodeToString(token[:]), TournamentID: id, State: "running", StartedAt: s.crawler.clock.Now()}
 	s.mu.Lock()
+	if s.stopping || s.ctx.Err() != nil {
+		s.mu.Unlock()
+		return domain.TournamentRefreshJob{}, context.Canceled
+	}
 	if len(s.order) == 100 {
 		delete(s.jobs, s.order[0])
 		s.order = s.order[1:]
@@ -121,5 +139,15 @@ func (s *TournamentRefresher) run(job domain.TournamentRefreshJob, tournament do
 	s.mu.Unlock()
 }
 
-// Wait is called after HTTP shutdown so no new start requests can add workers.
+// Wait waits for accepted requests and workers. The caller must prevent new
+// starts; application shutdown uses Shutdown to close admission first.
 func (s *TournamentRefresher) Wait() { s.workers.Wait() }
+
+// Shutdown closes job admission and drains accepted requests and workers even
+// if HTTP shutdown timed out. Cancel the application context before calling.
+func (s *TournamentRefresher) Shutdown() {
+	s.mu.Lock()
+	s.stopping = true
+	s.mu.Unlock()
+	s.Wait()
+}
