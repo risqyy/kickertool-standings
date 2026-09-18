@@ -315,7 +315,7 @@ func OpenSQLite(path string, clock ports.Clock) (*Repository, *gorm.DB, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	if err := db.AutoMigrate(&CrawlSyncStatusModel{}, &TournamentModel{}, &DisciplineModel{}, &StageModel{}, &GroupModel{}, &EntryModel{}, &PlayerModel{}, &PlayerNameAliasModel{}, &SourcePlayerIdentityModel{}, &EntryMembershipModel{}, &GroupStandingModel{}, &AllocationModel{}, &StandingModel{}, &PlayerAggregateModel{}, &PlayerMergeAuditModel{}, &TournamentInclusionAuditModel{}, &ManualRankingCorrectionModel{}, &ManualRankingCorrectionRevisionModel{}); err != nil {
+	if err := db.AutoMigrate(&CrawlSyncStatusModel{}, &TournamentModel{}, &DisciplineModel{}, &StageModel{}, &GroupModel{}, &EntryModel{}, &PlayerModel{}, &PlayerNameAliasModel{}, &SourcePlayerIdentityModel{}, &EntryMembershipModel{}, &GroupStandingModel{}, &AllocationModel{}, &StandingModel{}, &StandingArchiveModel{}, &PlayerAggregateModel{}, &PlayerMergeAuditModel{}, &TournamentInclusionAuditModel{}, &ManualRankingCorrectionModel{}, &ManualRankingCorrectionRevisionModel{}); err != nil {
 		return nil, db, fmt.Errorf("auto migrate tournaments: %w", err)
 	}
 	if err := backfillManualCorrectionYears(db); err != nil {
@@ -332,7 +332,7 @@ func New(db *gorm.DB, clock ports.Clock) (*Repository, error) {
 	if db == nil {
 		return nil, errors.New("gorm db is required")
 	}
-	if err := db.AutoMigrate(&CrawlSyncStatusModel{}, &TournamentModel{}, &DisciplineModel{}, &StageModel{}, &GroupModel{}, &EntryModel{}, &PlayerModel{}, &PlayerNameAliasModel{}, &SourcePlayerIdentityModel{}, &EntryMembershipModel{}, &GroupStandingModel{}, &AllocationModel{}, &StandingModel{}, &PlayerAggregateModel{}, &PlayerMergeAuditModel{}, &TournamentInclusionAuditModel{}, &ManualRankingCorrectionModel{}, &ManualRankingCorrectionRevisionModel{}); err != nil {
+	if err := db.AutoMigrate(&CrawlSyncStatusModel{}, &TournamentModel{}, &DisciplineModel{}, &StageModel{}, &GroupModel{}, &EntryModel{}, &PlayerModel{}, &PlayerNameAliasModel{}, &SourcePlayerIdentityModel{}, &EntryMembershipModel{}, &GroupStandingModel{}, &AllocationModel{}, &StandingModel{}, &StandingArchiveModel{}, &PlayerAggregateModel{}, &PlayerMergeAuditModel{}, &TournamentInclusionAuditModel{}, &ManualRankingCorrectionModel{}, &ManualRankingCorrectionRevisionModel{}); err != nil {
 		return nil, fmt.Errorf("auto migrate tournaments: %w", err)
 	}
 	if err := backfillManualCorrectionYears(db); err != nil {
@@ -728,7 +728,7 @@ func (r *Repository) UpsertStandingSnapshot(ctx context.Context, snapshot domain
 			if err := bindAllocationsToPlayer(tx, snapshot.Source, standing, player.ID); err != nil {
 				return err
 			}
-			existing, findErr := findStanding(tx, standing)
+			existing, findErr := findStanding(tx, standing, now)
 			if errors.Is(findErr, gorm.ErrRecordNotFound) {
 				if createErr := tx.Create(standingModel).Error; createErr != nil {
 					return fmt.Errorf("insert standing %s: %w", standing.StandingKey, createErr)
@@ -1027,7 +1027,7 @@ func upsertSourcePlayerIdentity(tx *gorm.DB, source, externalID, nameKey string,
 	return nil
 }
 
-func findStanding(tx *gorm.DB, standing domain.TournamentStanding) (StandingModel, error) {
+func findStanding(tx *gorm.DB, standing domain.TournamentStanding, now time.Time) (StandingModel, error) {
 	var bySourceID StandingModel
 	sourceIDErr := gorm.ErrRecordNotFound
 	if standing.StandingID != "" {
@@ -1046,6 +1046,21 @@ func findStanding(tx *gorm.DB, standing domain.TournamentStanding) (StandingMode
 		return StandingModel{}, playerErr
 	}
 	if sourceIDErr == nil && playerErr == nil && bySourceID.ID != byPlayer.ID {
+		// A historical identity must not prevent a new authoritative correction.
+		// Preserve the displaced raw row in the archive before freeing its unique
+		// keys. Two current rows remain ambiguous and must never be guessed at.
+		if byPlayer.Superseded {
+			if err := archiveObsoleteStanding(tx, byPlayer, now); err != nil {
+				return StandingModel{}, err
+			}
+			return bySourceID, nil
+		}
+		if bySourceID.Superseded {
+			if err := archiveObsoleteStanding(tx, bySourceID, now); err != nil {
+				return StandingModel{}, err
+			}
+			return byPlayer, nil
+		}
 		return StandingModel{}, fmt.Errorf("ambiguous standing identity: source standing ID and tournament player resolve to different rows")
 	}
 	if sourceIDErr == nil {

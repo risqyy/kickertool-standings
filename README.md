@@ -45,6 +45,9 @@ become current again. This also repairs duplicate contributions caused by rename
 HTML results with name-derived IDs, on the next successful complete refresh.
 Incomplete or failed refreshes never retire rows. Both the previous and current
 player aggregates are recalculated when a stable result changes its player name.
+If a later correction needs a unique identity occupied by an obsolete row, that
+row is archived in full before its keys are released, in the same transaction.
+Conflicting current rows still fail the refresh instead of merging identities.
 
 Explicitly **0 games** means non-participation: that source row contributes no
 tournament, points, games, or goal difference. A missing games value stays unknown

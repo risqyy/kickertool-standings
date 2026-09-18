@@ -246,3 +246,75 @@ func TestSupersededColumnMigrationPreservesLegacyRowsAndFingerprintShape(t *test
 		t.Fatalf("legacy JSON changed: %s %v", encoded, err)
 	}
 }
+
+func TestHistoricalIdentityCollisionArchivesAndRollsBackAtomically(t *testing.T) {
+	for _, mode := range []string{"current-id-new-name", "historical-id-current-name"} {
+		t.Run(mode, func(t *testing.T) {
+			repo, db := testRepo(t)
+			ctx := context.Background()
+			if _, err := repo.UpsertMany(ctx, []domain.Tournament{tournament("t", "T")}); err != nil {
+				t.Fatal(err)
+			}
+			old := mergeStanding("t", "id1", "p", "Earlier Name", 100, 2, 1)
+			current := mergeStanding("t", "id2", "p", "Corrected Name", 200, 2, 2)
+			for _, row := range []domain.TournamentStanding{old, current} {
+				if _, err := repo.UpsertStandingSnapshot(ctx, mergeSnapshot(row)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var obsolete StandingModel
+			if err := db.Where("superseded = ?", true).First(&obsolete).Error; err != nil {
+				t.Fatal(err)
+			}
+			next := current
+			if mode == "current-id-new-name" {
+				next.PlayerName = old.PlayerName
+			} else {
+				next.StandingID, next.StandingKey = old.StandingID, old.StandingKey
+			}
+			bad := mergeSnapshot(next)
+			bad.Standings = append(bad.Standings, mergeStanding("t", "zz-invalid", "x", "", 0, 1, 0))
+			if _, err := repo.UpsertStandingSnapshot(ctx, bad); err == nil {
+				t.Fatal("invalid snapshot accepted")
+			}
+			var count int64
+			db.Model(&StandingArchiveModel{}).Count(&count)
+			if count != 0 {
+				t.Fatal("failed transaction retained archive")
+			}
+			rows, _ := repo.ListPlayerRanking(ctx)
+			if len(rows) != 1 || rows[0].PlayerName != current.PlayerName {
+				t.Fatalf("failed transaction altered current result: %+v", rows)
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				if _, err := repo.UpsertStandingSnapshot(ctx, mergeSnapshot(next)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rows, _ = repo.ListPlayerRanking(ctx)
+			if len(rows) != 1 || rows[0].PlayerName != next.PlayerName || *rows[0].TotalPointsCents != 200 {
+				t.Fatalf("identity correction: %+v", rows)
+			}
+			var archives []StandingArchiveModel
+			if err := db.Find(&archives).Error; err != nil || len(archives) != 1 {
+				t.Fatalf("archives=%+v %v", archives, err)
+			}
+			var restored StandingModel
+			if err := json.Unmarshal([]byte(archives[0].SnapshotJSON), &restored); err != nil {
+				t.Fatal(err)
+			}
+			expectedJSON, err := json.Marshal(obsolete)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if archives[0].SnapshotJSON != string(expectedJSON) || archives[0].OriginalRowID != obsolete.ID || archives[0].TournamentRef != obsolete.TournamentRef {
+				t.Fatalf("archive lost source data: %+v", restored)
+			}
+			// Neither identity was merged or deleted; source IDs are only provenance.
+			db.Model(&PlayerModel{}).Where("merged_into_player_id IS NULL").Count(&count)
+			if count != 2 {
+				t.Fatalf("implicit identity merge: %d", count)
+			}
+		})
+	}
+}
